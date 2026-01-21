@@ -2861,9 +2861,12 @@ stream and cancels the underlying source when done.
 
 **Cancellation rules:**
 
-1. **Cancel a derived stream** → Only affects that branch; siblings unaffected
-2. **Cancel the parent stream** → All derived streams are cancelled
-3. **Errors in source** → Propagate to all derived streams
+1. **Cancel a branch** → Only affects that branch; other branches unaffected
+2. **Errors in source** → Propagate to all branches (via shared buffer)
+3. **Source closes** → All branches receive EOF when they reach end of data
+
+With `tee()`, there is no "parent" — all branches are peers with independent cursors into
+the shared buffer. Cancelling any one branch just removes its cursor; others continue.
 
 ```javascript
 // Sequential branching with take()
@@ -2871,15 +2874,15 @@ const header = stream.take(100); // Bytes 0-99
 const body = stream.take(1000); // Bytes 100-1099
 
 header.cancel(); // Only header cancelled; body still readable
-// OR
-stream.cancel(); // Both header and body cancelled
+body.cancel(); // Only body cancelled; stream still readable at byte 1100
 
 // Parallel branching with tee()
 const branch = stream.tee();
 
+// Branches are peers - cancelling one doesn't affect others
 branch.cancel(); // Only branch cancelled; stream still readable
-// OR
-stream.cancel(); // Both stream and branch cancelled
+stream.cancel(); // Only stream cancelled; branch still readable (if data available)
+// Both have independent cursors into the shared buffer
 ```
 
 **Combining `take()` and `tee()`:**
@@ -2898,6 +2901,27 @@ const branchHeader = await branch.take(100).bytes();
 const streamRest = await stream.bytes(); // Bytes 100+ from stream
 const branchRest = await branch.bytes(); // Bytes 100+ from branch
 ```
+
+**Tee'ing a limited stream (`take()` then `tee()`):**
+
+When you call `tee()` on a stream created by `take(n)`, the tee'd branch inherits the same
+byte limit. Both branches will yield the same limited data:
+
+```javascript
+const stream = Stream.from('hello world');
+const first5 = stream.take(5);   // Limited to bytes 0-4
+const branch = first5.tee();     // Branch inherits the 5-byte limit
+
+const [t1, t2] = await Promise.all([
+  first5.text(),
+  branch.text(),
+]);
+// Both t1 and t2 are 'hello' — the limit propagates to the tee'd branch
+```
+
+This ensures that `tee()` always produces a semantically equivalent branch — if the original
+stream has a limit, the branch has the same limit. The key invariant: **tee'd branches always
+yield identical data**.
 
 **Unified Buffer and Cursor Model:**
 
@@ -3987,6 +4011,53 @@ const { value, done } = await stream.read(buffer, {
 });
 ```
 
+### Concurrent Reads
+
+Multiple concurrent `read()` calls on the same stream are **queued and executed in order**.
+This provides deterministic behavior unlike Web Streams where concurrent reads can produce
+unpredictable results:
+
+```javascript
+const [stream, writer] = Stream.push();
+
+// Write data asynchronously
+(async () => {
+  await writer.write('a');
+  await writer.write('b');
+  await writer.write('c');
+  await writer.close();
+})();
+
+// Multiple reads issued concurrently
+const [r1, r2, r3] = await Promise.all([
+  stream.read(),
+  stream.read(),
+  stream.read(),
+]);
+
+// Reads complete in order: r1 gets 'a', r2 gets 'b', r3 gets 'c'
+// (or combined chunks depending on timing, but always in FIFO order)
+```
+
+**How it works:**
+- Each `read()` call is added to an internal queue
+- Reads execute sequentially, waiting for the previous read to complete
+- This ensures consistent cursor advancement and prevents data races
+
+**Performance note:** For maximum throughput, prefer using async iteration or the `bytes()`
+method rather than issuing many concurrent `read()` calls. The queuing adds minimal overhead
+but async iteration is more idiomatic:
+
+```javascript
+// Preferred: async iteration (implicitly serialized)
+for await (const chunk of stream) {
+  process(chunk);
+}
+
+// Or: single consumption call
+const allData = await stream.bytes();
+```
+
 ### Final Chunk with EOF (differs from Web Streams)
 
 Unlike Web Streams, this API allows `read()` to return **both data and done=true** in
@@ -4586,7 +4657,8 @@ interface Stream {
   [NewObject] Stream drop(unsigned long long byteCount);
 
   // Cap stream at n bytes; cancels source after limit reached
-  [NewObject] Stream limit(unsigned long long byteCount);
+  // Returns this stream (not a new object) - limit() is terminal, not branching
+  Stream limit(unsigned long long byteCount);
 
   // --- Branching ---
 
@@ -8632,7 +8704,7 @@ const buffer = await stream.arrayBuffer();
 
 #### New Stream API Cons
 
-- **No explicit locking**: Can't prevent concurrent reads (though rarely needed)
+- **No explicit locking**: Can't prevent concurrent reads (concurrent reads are queued instead)
 - **No reader reuse**: Each `read()` is independent (not a real limitation)
 
 ### Writing Data

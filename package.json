@@ -1,0 +1,20 @@
+{
+  "name": "new-streams",
+  "version": "0.1.0",
+  "description": "Prototype implementation of a redesigned Web Streams API",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx --test src/**/*.test.ts",
+    "test:watch": "node --import tsx --test --watch src/**/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  },
+  "keywords": ["streams", "async", "bytes"],
+  "license": "MIT"
+}
