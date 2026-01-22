@@ -23,6 +23,7 @@ export interface PendingRead {
   atLeast: number;
   max: number;
   target?: Uint8Array;  // BYOB target buffer
+  allowView?: boolean;  // If true, may return view into internal buffer
   resolve: (result: { value: Uint8Array | null; done: boolean }) => void;
   reject: (error: Error) => void;
 }
@@ -37,6 +38,7 @@ const DEFAULT_MAX_BUFFER = 1024 * 1024; // 1MB default
 
 export class UnifiedBuffer {
   private chunks: Uint8Array[] = [];
+  private chunkEndPositions: number[] = [];  // End position of each chunk for O(1) lookup
   private totalBytes = 0;
   private writePosition = 0;
   private minPosition = 0; // Position of oldest byte still needed
@@ -48,7 +50,7 @@ export class UnifiedBuffer {
   private pendingReads: PendingRead[] = [];
   private pendingWrites: PendingWrite[] = [];
   
-  private readonly maxBuffer: number;
+  readonly maxBuffer: number;
   private readonly hardMax: number;
   private readonly onOverflow: StreamOverflowPolicy;
 
@@ -129,19 +131,28 @@ export class UnifiedBuffer {
   }
 
   /**
-   * Read bytes for a cursor (allocates new buffer)
+   * Read bytes for a cursor
+   * @param cursor - The cursor to read from
+   * @param maxBytes - Maximum bytes to read
+   * @param allowView - If true, may return a view into internal buffer (faster but caller must not detach)
    */
-  read(cursor: Cursor, maxBytes: number): Uint8Array | null {
+  read(cursor: Cursor, maxBytes: number, allowView = false): Uint8Array | null {
     const available = this.getAvailableBytes(cursor);
     if (available === 0) {
       return null;
     }
 
     const toRead = Math.min(maxBytes, available);
-    const data = this.sliceBytes(cursor.position, cursor.position + toRead);
+    const data = allowView 
+      ? this.sliceBytesView(cursor.position, cursor.position + toRead)
+      : this.sliceBytes(cursor.position, cursor.position + toRead);
     cursor.position += toRead;
     
-    this.maybeReclaimMemory();
+    // Only reclaim memory when buffer is getting full (>50% of max)
+    // This avoids expensive reclaim operations on every read
+    if (this.totalBytes > this.maxBuffer / 2) {
+      this.maybeReclaimMemory();
+    }
     this.maybeResolveBlockedWrites();
     
     return data;
@@ -161,7 +172,10 @@ export class UnifiedBuffer {
     this.copyBytesInto(cursor.position, cursor.position + toRead, target);
     cursor.position += toRead;
     
-    this.maybeReclaimMemory();
+    // Only reclaim memory when buffer is getting full (>50% of max)
+    if (this.totalBytes > this.maxBuffer / 2) {
+      this.maybeReclaimMemory();
+    }
     this.maybeResolveBlockedWrites();
     
     return toRead;
@@ -170,14 +184,16 @@ export class UnifiedBuffer {
   /**
    * Async read that waits for data
    * If target is provided (BYOB mode), reads directly into that buffer
+   * @param options.allowView - If true, may return a view into internal buffer (faster)
    */
   async readAsync(
     cursor: Cursor,
-    options: { atLeast?: number; max?: number; signal?: AbortSignal; target?: Uint8Array } = {}
+    options: { atLeast?: number; max?: number; signal?: AbortSignal; target?: Uint8Array; allowView?: boolean } = {}
   ): Promise<{ value: Uint8Array | null; done: boolean }> {
     const atLeast = options.atLeast ?? 1;
     const max = options.target?.byteLength ?? options.max ?? Infinity;
     const target = options.target;
+    const allowView = options.allowView ?? false;
 
     // Check if already satisfied
     const available = this.getAvailableBytes(cursor);
@@ -196,8 +212,8 @@ export class UnifiedBuffer {
         const value = new Uint8Array(target.buffer, target.byteOffset, bytesRead);
         return { value, done: this.isCursorDone(cursor) };
       } else {
-        // Allocating mode
-        const value = this.read(cursor, toRead);
+        // Allocating mode - use view if allowed for better performance
+        const value = this.read(cursor, toRead, allowView);
         return { value, done: this.isCursorDone(cursor) };
       }
     }
@@ -218,6 +234,7 @@ export class UnifiedBuffer {
         atLeast,
         max,
         target,
+        allowView,
         resolve,
         reject,
       };
@@ -281,6 +298,7 @@ export class UnifiedBuffer {
 
     // Add data to buffer
     this.chunks.push(data);
+    this.chunkEndPositions.push(this.writePosition + data.byteLength);
     this.totalBytes += data.byteLength;
     this.writePosition += data.byteLength;
 
@@ -455,11 +473,13 @@ export class UnifiedBuffer {
       const chunk = this.chunks[0];
       if (chunk.byteLength <= bytesToDiscard) {
         this.chunks.shift();
+        this.chunkEndPositions.shift();
         bytesToDiscard -= chunk.byteLength;
         this.totalBytes -= chunk.byteLength;
       } else {
         // Partial chunk - slice it
         this.chunks[0] = chunk.slice(bytesToDiscard);
+        // Update the first chunk end position (it's still at the same global position)
         this.totalBytes -= bytesToDiscard;
         bytesToDiscard = 0;
       }
@@ -507,8 +527,8 @@ export class UnifiedBuffer {
         const value = new Uint8Array(pending.target.buffer, pending.target.byteOffset, bytesRead);
         pending.resolve({ value, done: this.isCursorDone(pending.cursor) });
       } else {
-        // Allocating mode
-        const value = this.read(pending.cursor, toRead);
+        // Allocating mode - use view if allowed
+        const value = this.read(pending.cursor, toRead, pending.allowView);
         pending.resolve({ value, done: this.isCursorDone(pending.cursor) });
       }
     }
@@ -566,14 +586,87 @@ export class UnifiedBuffer {
     this.maybeReclaimMemory();
   }
 
+  /**
+   * Find the chunk index that contains the given position using binary search
+   */
+  private findChunkIndex(position: number): number {
+    // Binary search for the first chunk whose end position is > position
+    let low = 0;
+    let high = this.chunkEndPositions.length - 1;
+    
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (this.chunkEndPositions[mid] <= position) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low;
+  }
+
+  /**
+   * Get bytes as a view (no copy) when possible, otherwise copy.
+   * WARNING: Caller must not detach the returned buffer as it may be internal data.
+   */
+  private sliceBytesView(start: number, end: number): Uint8Array {
+    const length = end - start;
+    if (length <= 0) {
+      return new Uint8Array(0);
+    }
+
+    // Use binary search to find the starting chunk
+    const startChunkIdx = this.findChunkIndex(start);
+    
+    // Check if the entire read fits within a single chunk
+    if (startChunkIdx < this.chunkEndPositions.length) {
+      const chunkEnd = this.chunkEndPositions[startChunkIdx];
+      if (end <= chunkEnd) {
+        // Single chunk case - return a view (no allocation!)
+        const chunk = this.chunks[startChunkIdx];
+        const chunkStart = startChunkIdx === 0 ? this.minPosition : this.chunkEndPositions[startChunkIdx - 1];
+        const sliceStart = start - chunkStart;
+        return chunk.subarray(sliceStart, sliceStart + length);
+      }
+    }
+
+    // Multi-chunk case - must copy
+    const result = new Uint8Array(length);
+    this.copyBytesIntoFast(start, end, result, startChunkIdx);
+    return result;
+  }
+
   private sliceBytes(start: number, end: number): Uint8Array {
     const length = end - start;
     if (length <= 0) {
       return new Uint8Array(0);
     }
 
+    // Always copy data to ensure caller owns the result
+    // This is necessary because callers (like Writer) may detach the buffer,
+    // which would corrupt our internal state if we returned a view
+    
+    // Use binary search to find the starting chunk
+    const startChunkIdx = this.findChunkIndex(start);
+    
+    // Allocate result buffer
     const result = new Uint8Array(length);
-    this.copyBytesInto(start, end, result);
+    
+    // Check if the entire read fits within a single chunk
+    if (startChunkIdx < this.chunkEndPositions.length) {
+      const chunkEnd = this.chunkEndPositions[startChunkIdx];
+      if (end <= chunkEnd) {
+        // Single chunk case - direct copy
+        const chunk = this.chunks[startChunkIdx];
+        const chunkStart = startChunkIdx === 0 ? this.minPosition : this.chunkEndPositions[startChunkIdx - 1];
+        const sliceStart = start - chunkStart;
+        result.set(chunk.subarray(sliceStart, sliceStart + length));
+        return result;
+      }
+    }
+
+    // Multi-chunk case
+    this.copyBytesIntoFast(start, end, result, startChunkIdx);
     return result;
   }
 
@@ -581,23 +674,32 @@ export class UnifiedBuffer {
    * Copy bytes from buffer range directly into target array
    */
   private copyBytesInto(start: number, end: number, target: Uint8Array): void {
-    let offset = 0;
-    let chunkStart = this.minPosition;
+    this.copyBytesIntoFast(start, end, target, 0);
+  }
 
-    for (const chunk of this.chunks) {
-      const chunkEnd = chunkStart + chunk.byteLength;
+  /**
+   * Copy bytes from buffer range into target array, starting from a known chunk index
+   */
+  private copyBytesIntoFast(start: number, end: number, target: Uint8Array, startChunkIdx: number): void {
+    let offset = 0;
+    
+    for (let i = startChunkIdx; i < this.chunks.length; i++) {
+      const chunk = this.chunks[i];
+      const chunkEnd = this.chunkEndPositions[i];
+      const chunkStart = i === 0 ? this.minPosition : this.chunkEndPositions[i - 1];
       
       if (chunkEnd > start && chunkStart < end) {
         // This chunk overlaps with requested range
         const sliceStart = Math.max(0, start - chunkStart);
         const sliceEnd = Math.min(chunk.byteLength, end - chunkStart);
-        // Use subarray instead of slice to avoid allocation, then set
+        const copyLen = sliceEnd - sliceStart;
+        
+        // Use subarray to avoid allocation, then set
         target.set(chunk.subarray(sliceStart, sliceEnd), offset);
-        offset += sliceEnd - sliceStart;
+        offset += copyLen;
       }
       
-      chunkStart = chunkEnd;
-      if (chunkStart >= end) break;
+      if (chunkEnd >= end) break;
     }
   }
 }

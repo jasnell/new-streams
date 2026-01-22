@@ -329,23 +329,79 @@ export class Stream implements AsyncIterable<Uint8Array> {
 
   /**
    * Collect all bytes as Uint8Array
+   * 
+   * Optimized to read chunks directly without async iterator overhead,
+   * then concatenate in a single pass.
    */
   async bytes(options: StreamConsumeOptions = {}): Promise<Uint8Array> {
+    // Auto-attach if detached
+    if (this.#detached) {
+      this.attach();
+    }
+
+    if (this.#cancelled) {
+      return new Uint8Array(0);
+    }
+
+    // Collect chunks using direct read() calls instead of async iteration
+    // Use allowView: true since we're copying to a final buffer anyway
     const chunks: Uint8Array[] = [];
+    let totalLength = 0;
     
-    for await (const chunk of this.#iterate(options.signal)) {
-      chunks.push(chunk);
+    while (!this.#cancelled) {
+      const { value, done } = await this.#buffer.readAsync(this.#cursor, {
+        signal: options.signal,
+        allowView: true,  // Safe: we copy to final result, don't detach
+      });
+      
+      if (value) {
+        chunks.push(value);
+        totalLength += value.byteLength;
+        this.#bytesRead += value.byteLength;
+      }
+      
+      if (done) {
+        break;
+      }
     }
     
-    return concatBytes(chunks);
+    this.#resolveClose(this.#bytesRead);
+    
+    // Fast path: single chunk or empty
+    if (chunks.length === 0) {
+      return new Uint8Array(0);
+    }
+    if (chunks.length === 1) {
+      return chunks[0];
+    }
+    
+    // Concatenate all chunks in single allocation
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    
+    return result;
   }
 
   /**
    * Collect all bytes as ArrayBuffer
+   * 
+   * Optimized to avoid copying when the bytes result already owns
+   * its underlying ArrayBuffer (single chunk case).
    */
   async arrayBuffer(options: StreamConsumeOptions = {}): Promise<ArrayBuffer> {
     const bytes = await this.bytes(options);
-    // Copy to a new ArrayBuffer to ensure clean ownership
+    
+    // If bytes is a view of the entire ArrayBuffer with no offset,
+    // we can return the underlying buffer directly
+    if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
+      return bytes.buffer as ArrayBuffer;
+    }
+    
+    // Otherwise copy to a new ArrayBuffer to ensure clean ownership
     const buffer = new ArrayBuffer(bytes.byteLength);
     new Uint8Array(buffer).set(bytes);
     return buffer;
@@ -353,11 +409,13 @@ export class Stream implements AsyncIterable<Uint8Array> {
 
   /**
    * Collect and decode as text
+   * 
+   * Uses optimized bytes() collection then decodes the result.
+   * This is faster than streaming decode due to string concatenation overhead.
    */
   async text(encoding = 'utf-8', options: StreamConsumeOptions = {}): Promise<string> {
     const bytes = await this.bytes(options);
-    const decoder = new TextDecoder(encoding);
-    return decoder.decode(bytes);
+    return new TextDecoder(encoding).decode(bytes);
   }
 
   // ==================== Slicing Operators ====================
@@ -726,11 +784,25 @@ export class Stream implements AsyncIterable<Uint8Array> {
     try {
       if (isAsyncGenerator(generator)) {
         for await (const value of generator) {
-          await this.#handlePullValue(value, encoding);
+          // For async generators, always use the async handler
+          // The `for await` already yields to event loop between iterations
+          await this.#handlePullValueAsync(value, encoding);
         }
       } else if (isGenerator(generator)) {
+        // Sync generator: try fast path, apply backpressure when buffer is full
         for (const value of generator) {
-          await this.#handlePullValue(value, encoding);
+          // Check if buffer needs draining (backpressure)
+          const bufferUsage = this.#buffer.getBufferUsage();
+          if (bufferUsage >= this.#buffer.maxBuffer * 0.8) {
+            // Buffer is mostly full - yield to let consumers catch up
+            await new Promise<void>(resolve => setImmediate(resolve));
+          }
+          
+          const needsAsync = this.#handlePullValueSync(value, encoding);
+          if (needsAsync) {
+            // Value requires async handling (Stream or async generator)
+            await this.#handlePullValueAsync(value, encoding);
+          }
         }
       }
       this.#buffer.close();
@@ -741,7 +813,37 @@ export class Stream implements AsyncIterable<Uint8Array> {
     }
   }
 
-  async #handlePullValue(value: unknown, encoding: string): Promise<void> {
+  /**
+   * Synchronous value handler - returns true if value needs async handling
+   */
+  #handlePullValueSync(value: unknown, encoding: string): boolean {
+    // If it's a sync generator, consume it inline (sync)
+    if (isGenerator(value)) {
+      for (const chunk of value) {
+        const needsAsync = this.#handlePullValueSync(chunk as StreamWriteData, encoding);
+        if (needsAsync) {
+          // Can't handle async in sync loop - caller must handle
+          return true;
+        }
+      }
+      return false;
+    }
+
+    // Streams and async generators require async handling
+    if (value instanceof Stream || isAsyncGenerator(value)) {
+      return true; // Signal to caller to use async path
+    }
+
+    // Convert to bytes and write (sync)
+    const bytes = toUint8Array(value as StreamWriteData, encoding);
+    this.#buffer.write(bytes);
+    return false;
+  }
+
+  /**
+   * Async value handler for values that need async processing
+   */
+  async #handlePullValueAsync(value: unknown, encoding: string): Promise<void> {
     // If it's a Stream, consume it inline
     if (value instanceof Stream) {
       for await (const chunk of value) {
@@ -750,17 +852,21 @@ export class Stream implements AsyncIterable<Uint8Array> {
       return;
     }
 
-    // If it's a generator, consume it inline
+    // If it's an async generator, consume it inline
     if (isAsyncGenerator(value)) {
       for await (const chunk of value) {
-        await this.#handlePullValue(chunk as StreamWriteData, encoding);
+        await this.#handlePullValueAsync(chunk as StreamWriteData, encoding);
       }
       return;
     }
 
+    // If it's a sync generator, try sync first, fall back to async
     if (isGenerator(value)) {
       for (const chunk of value) {
-        await this.#handlePullValue(chunk as StreamWriteData, encoding);
+        const needsAsync = this.#handlePullValueSync(chunk as StreamWriteData, encoding);
+        if (needsAsync) {
+          await this.#handlePullValueAsync(chunk as StreamWriteData, encoding);
+        }
       }
       return;
     }
