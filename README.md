@@ -176,6 +176,12 @@ A complete reference implementation is available in this repository demonstratin
 | [samples/](samples/) | Sample files demonstrating API usage patterns |
 | [benchmarks/](benchmarks/) | Benchmark suites comparing performance with Web Streams |
 
+### Installing from npm
+
+```bash
+npm install new-streams
+```
+
 ### Running the Reference Implementation
 
 ```bash
