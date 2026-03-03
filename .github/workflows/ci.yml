@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  samples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run all samples
+        run: |
+          failed=0
+          for f in samples/[0-9]*.ts; do
+            echo "::group::$f"
+            if npx tsx "$f"; then
+              echo "OK"
+            else
+              echo "::error::$f failed"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
+
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run all benchmarks
+        run: |
+          failed=0
+          for f in benchmarks/[0-9]*.ts; do
+            echo "::group::$f"
+            if npx tsx "$f"; then
+              echo "OK"
+            else
+              echo "::error::$f failed"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
