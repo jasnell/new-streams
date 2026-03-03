@@ -145,7 +145,7 @@ async function main() {
     } catch (e) {
       console.log('pipeTo() aborted:', (e as Error).name);
       console.log('Partial data written:', writer.getText());
-      console.log('Writer was aborted:', writer.aborted);
+      console.log('Writer was failed (desiredSize null):', writer.desiredSize === null);
     }
   }
 
@@ -310,8 +310,8 @@ async function main() {
       console.log('ERROR: Should have thrown!');
     } catch (e) {
       console.log('Pipeline error:', (e as Error).message);
-      console.log('Writer aborted:', writer.aborted);
-      console.log('Abort reason:', writer.abortReason?.message);
+      console.log('Writer failed (desiredSize null):', writer.desiredSize === null);
+      console.log('Error:', (e as Error).message);
     }
   }
 

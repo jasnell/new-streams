@@ -115,7 +115,7 @@ async function main() {
     }
 
     // Clean up
-    await writer.abort(new Error('cleanup'));
+    await writer.fail(new Error('cleanup'));
     await p1.catch(() => {});
     await p2.catch(() => {});
     await Stream.bytes(readable).catch(() => {});

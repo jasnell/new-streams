@@ -103,26 +103,31 @@ function createAes256GcmEncryptTransform(
 
   const transform: TransformObject = {
 
-    async *transform(source: AsyncIterable<Uint8Array[] | null>) {
-      for await (const batches of source) {
-        if (batches === null) {
-          const output = await processChunk(null);
-          for (const chunk of output) {
-            yield chunk;
+    async *transform(source: AsyncIterable<Uint8Array[] | null>, { signal }: { signal: AbortSignal }) {
+      const onAbort = () => {
+        cipher.destroy(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        for await (const batches of source) {
+          if (batches === null) {
+            const output = await processChunk(null);
+            for (const chunk of output) {
+              yield chunk;
+            }
+            continue;
           }
-          continue;
-        }
-        for (const chunk of batches) {
-          const output = await processChunk(chunk);
-          for (const out of output) {
-            yield out;
+          for (const chunk of batches) {
+            const output = await processChunk(chunk);
+            for (const out of output) {
+              yield out;
+            }
           }
         }
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+        cipher.destroy();
       }
-    },
-
-    abort(reason) {
-      cipher.destroy(reason instanceof Error ? reason : new Error(String(reason)));
     },
   };
 
@@ -186,26 +191,31 @@ function createAes256GcmDecryptTransform(
 
   return {
 
-    async *transform(source: AsyncIterable<Uint8Array[] | null>) {
-      for await (const batches of source) {
-        if (batches === null) {
-          const output = await processChunk(null);
-          for (const chunk of output) {
-            yield chunk;
+    async *transform(source: AsyncIterable<Uint8Array[] | null>, { signal }: { signal: AbortSignal }) {
+      const onAbort = () => {
+        decipher.destroy(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        for await (const batches of source) {
+          if (batches === null) {
+            const output = await processChunk(null);
+            for (const chunk of output) {
+              yield chunk;
+            }
+            continue;
           }
-          continue;
-        }
-        for (const chunk of batches) {
-          const output = await processChunk(chunk);
-          for (const out of output) {
-            yield out;
+          for (const chunk of batches) {
+            const output = await processChunk(chunk);
+            for (const out of output) {
+              yield out;
+            }
           }
         }
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+        decipher.destroy();
       }
-    },
-
-    abort(reason) {
-      decipher.destroy(reason instanceof Error ? reason : new Error(String(reason)));
     },
   };
 }
@@ -255,26 +265,31 @@ function createAes256CbcEncryptTransform(key: Uint8Array): EncryptTransformWithP
 
   const transform: TransformObject = {
 
-    async *transform(source: AsyncIterable<Uint8Array[] | null>) {
-      for await (const batches of source) {
-        if (batches === null) {
-          const output = await processChunk(null);
-          for (const chunk of output) {
-            yield chunk;
+    async *transform(source: AsyncIterable<Uint8Array[] | null>, { signal }: { signal: AbortSignal }) {
+      const onAbort = () => {
+        cipher.destroy(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        for await (const batches of source) {
+          if (batches === null) {
+            const output = await processChunk(null);
+            for (const chunk of output) {
+              yield chunk;
+            }
+            continue;
           }
-          continue;
-        }
-        for (const chunk of batches) {
-          const output = await processChunk(chunk);
-          for (const out of output) {
-            yield out;
+          for (const chunk of batches) {
+            const output = await processChunk(chunk);
+            for (const out of output) {
+              yield out;
+            }
           }
         }
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+        cipher.destroy();
       }
-    },
-
-    abort(reason) {
-      cipher.destroy(reason instanceof Error ? reason : new Error(String(reason)));
     },
   };
 
@@ -328,26 +343,31 @@ function createAes256CbcDecryptTransform(
 
   return {
 
-    async *transform(source: AsyncIterable<Uint8Array[] | null>) {
-      for await (const batches of source) {
-        if (batches === null) {
-          const output = await processChunk(null);
-          for (const chunk of output) {
-            yield chunk;
+    async *transform(source: AsyncIterable<Uint8Array[] | null>, { signal }: { signal: AbortSignal }) {
+      const onAbort = () => {
+        decipher.destroy(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        for await (const batches of source) {
+          if (batches === null) {
+            const output = await processChunk(null);
+            for (const chunk of output) {
+              yield chunk;
+            }
+            continue;
           }
-          continue;
-        }
-        for (const chunk of batches) {
-          const output = await processChunk(chunk);
-          for (const out of output) {
-            yield out;
+          for (const chunk of batches) {
+            const output = await processChunk(chunk);
+            for (const out of output) {
+              yield out;
+            }
           }
         }
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+        decipher.destroy();
       }
-    },
-
-    abort(reason) {
-      decipher.destroy(reason instanceof Error ? reason : new Error(String(reason)));
     },
   };
 }
@@ -404,26 +424,31 @@ function createChaCha20Poly1305EncryptTransform(
 
   const transform: TransformObject = {
 
-    async *transform(source: AsyncIterable<Uint8Array[] | null>) {
-      for await (const batches of source) {
-        if (batches === null) {
-          const output = await processChunk(null);
-          for (const chunk of output) {
-            yield chunk;
+    async *transform(source: AsyncIterable<Uint8Array[] | null>, { signal }: { signal: AbortSignal }) {
+      const onAbort = () => {
+        cipher.destroy(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        for await (const batches of source) {
+          if (batches === null) {
+            const output = await processChunk(null);
+            for (const chunk of output) {
+              yield chunk;
+            }
+            continue;
           }
-          continue;
-        }
-        for (const chunk of batches) {
-          const output = await processChunk(chunk);
-          for (const out of output) {
-            yield out;
+          for (const chunk of batches) {
+            const output = await processChunk(chunk);
+            for (const out of output) {
+              yield out;
+            }
           }
         }
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+        cipher.destroy();
       }
-    },
-
-    abort(reason) {
-      cipher.destroy(reason instanceof Error ? reason : new Error(String(reason)));
     },
   };
 
@@ -483,26 +508,31 @@ function createChaCha20Poly1305DecryptTransform(
 
   return {
 
-    async *transform(source: AsyncIterable<Uint8Array[] | null>) {
-      for await (const batches of source) {
-        if (batches === null) {
-          const output = await processChunk(null);
-          for (const chunk of output) {
-            yield chunk;
+    async *transform(source: AsyncIterable<Uint8Array[] | null>, { signal }: { signal: AbortSignal }) {
+      const onAbort = () => {
+        decipher.destroy(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        for await (const batches of source) {
+          if (batches === null) {
+            const output = await processChunk(null);
+            for (const chunk of output) {
+              yield chunk;
+            }
+            continue;
           }
-          continue;
-        }
-        for (const chunk of batches) {
-          const output = await processChunk(chunk);
-          for (const out of output) {
-            yield out;
+          for (const chunk of batches) {
+            const output = await processChunk(chunk);
+            for (const out of output) {
+              yield out;
+            }
           }
         }
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+        decipher.destroy();
       }
-    },
-
-    abort(reason) {
-      decipher.destroy(reason instanceof Error ? reason : new Error(String(reason)));
     },
   };
 }
@@ -604,21 +634,27 @@ async function main() {
 
       return {
 
-        async *transform(source: AsyncIterable<Uint8Array[] | null>) {
-          for await (const batches of source) {
-            if (batches === null) {
-              const output = await processChunk(null);
-              for (const chunk of output) yield chunk;
-              continue;
+        async *transform(source: AsyncIterable<Uint8Array[] | null>, { signal }: { signal: AbortSignal }) {
+          const onAbort = () => {
+            gzip.destroy(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+          try {
+            for await (const batches of source) {
+              if (batches === null) {
+                const output = await processChunk(null);
+                for (const chunk of output) yield chunk;
+                continue;
+              }
+              for (const chunk of batches) {
+                const output = await processChunk(chunk);
+                for (const out of output) yield out;
+              }
             }
-            for (const chunk of batches) {
-              const output = await processChunk(chunk);
-              for (const out of output) yield out;
-            }
+          } finally {
+            signal.removeEventListener('abort', onAbort);
+            gzip.destroy();
           }
-        },
-        abort(reason) {
-          gzip.destroy(reason instanceof Error ? reason : new Error(String(reason)));
         },
       };
     }
@@ -652,21 +688,27 @@ async function main() {
 
       return {
 
-        async *transform(source: AsyncIterable<Uint8Array[] | null>) {
-          for await (const batches of source) {
-            if (batches === null) {
-              const output = await processChunk(null);
-              for (const chunk of output) yield chunk;
-              continue;
+        async *transform(source: AsyncIterable<Uint8Array[] | null>, { signal }: { signal: AbortSignal }) {
+          const onAbort = () => {
+            gunzip.destroy(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+          try {
+            for await (const batches of source) {
+              if (batches === null) {
+                const output = await processChunk(null);
+                for (const chunk of output) yield chunk;
+                continue;
+              }
+              for (const chunk of batches) {
+                const output = await processChunk(chunk);
+                for (const out of output) yield out;
+              }
             }
-            for (const chunk of batches) {
-              const output = await processChunk(chunk);
-              for (const out of output) yield out;
-            }
+          } finally {
+            signal.removeEventListener('abort', onAbort);
+            gunzip.destroy();
           }
-        },
-        abort(reason) {
-          gunzip.destroy(reason instanceof Error ? reason : new Error(String(reason)));
         },
       };
     }
@@ -888,7 +930,7 @@ async function main() {
   }
 
   // ============================================================================
-  // Example 7: Error handling with transform abort()
+  // Example 7: Error Handling with Transform Signal
   // ============================================================================
   section('Example 7: Error Handling');
 

@@ -13,6 +13,7 @@ import {
   type Transform,
   type TransformObject,
   type TransformFn,
+  type TransformOptions,
   type StatefulTransformFn,
   type TransformYield,
   type AsyncTransformResult,
@@ -363,10 +364,11 @@ function isUint8ArrayBatch(result: unknown): result is Uint8Array[] {
  */
 async function* applyStatelessAsyncTransform(
   source: AsyncIterable<Uint8Array[] | null>,
-  transform: TransformFn
+  transform: TransformFn,
+  options: TransformOptions
 ): AsyncGenerator<Uint8Array[]> {
   for await (const chunks of source) {
-    const result = transform(chunks);
+    const result = transform(chunks, options);
     // Fast path: result is already Uint8Array[] (common case)
     if (result === null) continue;
     if (isUint8ArrayBatch(result)) {
@@ -422,9 +424,10 @@ async function* applyStatelessAsyncTransform(
  */
 async function* applyStatefulAsyncTransform(
   source: AsyncIterable<Uint8Array[] | null>,
-  transform: StatefulTransformFn
+  transform: StatefulTransformFn,
+  options: TransformOptions
 ): AsyncGenerator<Uint8Array[]> {
-  const output = transform(source);
+  const output = transform(source, options);
   for await (const item of output) {
     const batch: Uint8Array[] = [];
     for await (const chunk of flattenTransformYieldAsync(item)) {
@@ -491,46 +494,63 @@ async function* createAsyncPipeline(
     return;
   }
 
+  // Create internal controller for transform cancellation.
+  // Note: if signal was already aborted, we threw above — no need to check here.
+  const controller = new AbortController();
+  let abortHandler: (() => void) | undefined;
+  if (signal) {
+    abortHandler = () => {
+      try {
+        controller.abort(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      } catch { /* transform signal listeners may throw — suppress */ }
+    };
+    signal.addEventListener('abort', abortHandler);
+  }
+
   // Add flush signal
   let current: AsyncIterable<Uint8Array[] | null> = withFlushSignalAsync(normalized);
 
-  // Track stateful transforms for abort handling (only objects have abort handlers)
-  const statefulTransforms: TransformObject[] = [];
-
-  try {
-    // Apply transforms
-    // Object = stateful, function = stateless
-    for (const transform of transforms) {
-      if (isTransformObject(transform)) {
-        statefulTransforms.push(transform);
-        current = applyStatefulAsyncTransform(current, transform.transform);
-      } else {
-        current = applyStatelessAsyncTransform(current, transform);
-      }
+  // Apply transforms — each gets its own options object
+  // Object = stateful, function = stateless
+  for (const transform of transforms) {
+    const options: TransformOptions = { signal: controller.signal };
+    if (isTransformObject(transform)) {
+      current = applyStatefulAsyncTransform(current, transform.transform, options);
+    } else {
+      current = applyStatelessAsyncTransform(current, transform, options);
     }
+  }
 
-    // Yield results (filter out null from final output)
+  // Yield results (filter out null from final output)
+  let completed = false;
+  try {
     for await (const batch of current) {
       // Check for abort on each iteration
-      if (signal?.aborted) {
-        throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+      if (controller.signal.aborted) {
+        throw controller.signal.reason ?? new DOMException('Aborted', 'AbortError');
       }
       if (batch !== null) {
         yield batch;
       }
     }
+    completed = true;
   } catch (error) {
-    // Abort all stateful transforms
-    for (const transformObj of statefulTransforms) {
-      if (transformObj.abort) {
-        try {
-          await transformObj.abort(error instanceof Error ? error : new Error(String(error)));
-        } catch {
-          // Ignore abort errors
-        }
-      }
+    if (!controller.signal.aborted) {
+      try {
+        controller.abort(error instanceof Error ? error : new Error(String(error)));
+      } catch { /* transform signal listeners may throw — suppress */ }
     }
     throw error;
+  } finally {
+    if (!completed && !controller.signal.aborted) {
+      try {
+        controller.abort(new DOMException('Aborted', 'AbortError'));
+      } catch { /* transform signal listeners may throw — suppress */ }
+    }
+    // Clean up user signal listener to prevent holding controller alive
+    if (signal && abortHandler) {
+      signal.removeEventListener('abort', abortHandler);
+    }
   }
 }
 
@@ -622,8 +642,8 @@ export function pipeToSync(
       writer.end();
     }
   } catch (error) {
-    if (!options?.preventAbort) {
-      writer.abort(error instanceof Error ? error : new Error(String(error)));
+    if (!options?.preventFail) {
+      writer.fail(error instanceof Error ? error : new Error(String(error)));
     }
     throw error;
   }
@@ -663,9 +683,10 @@ export async function pipeTo(
   const hasWritev = typeof writer.writev === 'function';
 
   // Helper to write a batch efficiently - avoids per-chunk await when possible
+  // A new WriteOptions object is created per call to avoid mutation concerns.
   const writeBatch = async (batch: Uint8Array[]): Promise<void> => {
     if (hasWritev && batch.length > 1) {
-      await writer.writev!(batch);
+      await writer.writev!(batch, signal ? { signal } : undefined);
       for (const chunk of batch) {
         totalBytes += chunk.byteLength;
       }
@@ -673,7 +694,7 @@ export async function pipeTo(
       // Write chunks, collecting any promises
       const promises: Promise<void>[] = [];
       for (const chunk of batch) {
-        const result = writer.write(chunk);
+        const result = writer.write(chunk, signal ? { signal } : undefined);
         if (result !== undefined) {
           promises.push(result);
         }
@@ -723,11 +744,11 @@ export async function pipeTo(
     }
 
     if (!options?.preventClose) {
-      await writer.end();
+      await writer.end(signal ? { signal } : undefined);
     }
   } catch (error) {
-    if (!options?.preventAbort) {
-      await writer.abort(error instanceof Error ? error : new Error(String(error)));
+    if (!options?.preventFail) {
+      await writer.fail(error instanceof Error ? error : new Error(String(error)));
     }
     throw error;
   }

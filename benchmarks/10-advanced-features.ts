@@ -10,7 +10,7 @@
  */
 
 import { Stream } from '../src/index.js';
-import type { Transform, Writer, SyncWriter } from '../src/index.js';
+import type { Transform, Writer, SyncWriter, WriteOptions } from '../src/index.js';
 import {
   benchmark,
   createComparison,
@@ -350,12 +350,12 @@ async function runBenchmarks(): Promise<void> {
         return this.closed ? null : 16;
       }
 
-      async write(chunk: Uint8Array | string): Promise<void> {
+      async write(chunk: Uint8Array | string, _options?: WriteOptions): Promise<void> {
         const data = typeof chunk === 'string' ? new TextEncoder().encode(chunk) : chunk;
         this.totalBytes += data.byteLength;
       }
 
-      async writev(chunks: (Uint8Array | string)[]): Promise<void> {
+      async writev(chunks: (Uint8Array | string)[], _options?: WriteOptions): Promise<void> {
         for (const chunk of chunks) {
           await this.write(chunk);
         }
@@ -374,7 +374,7 @@ async function runBenchmarks(): Promise<void> {
         return true;
       }
 
-      async end(): Promise<number> {
+      async end(_options?: WriteOptions): Promise<number> {
         this.closed = true;
         return this.totalBytes;
       }
@@ -384,11 +384,11 @@ async function runBenchmarks(): Promise<void> {
         return this.totalBytes;
       }
 
-      async abort(): Promise<void> {
+      async fail(): Promise<void> {
         this.closed = true;
       }
 
-      abortSync(): boolean {
+      failSync(): boolean {
         this.closed = true;
         return true;
       }
@@ -474,7 +474,7 @@ async function runBenchmarks(): Promise<void> {
         return this.totalBytes;
       }
 
-      abort(): void {
+      fail(): void {
         this.closed = true;
       }
     }
@@ -507,12 +507,12 @@ async function runBenchmarks(): Promise<void> {
             return this.closed ? null : 16;
           }
 
-          async write(chunk: Uint8Array | string): Promise<void> {
+          async write(chunk: Uint8Array | string, _options?: WriteOptions): Promise<void> {
             const data = typeof chunk === 'string' ? new TextEncoder().encode(chunk) : chunk;
             this.totalBytes += data.byteLength;
           }
 
-          async writev(chunks: (Uint8Array | string)[]): Promise<void> {
+          async writev(chunks: (Uint8Array | string)[], _options?: WriteOptions): Promise<void> {
             for (const chunk of chunks) {
               await this.write(chunk);
             }
@@ -531,7 +531,7 @@ async function runBenchmarks(): Promise<void> {
             return true;
           }
 
-          async end(): Promise<number> {
+          async end(_options?: WriteOptions): Promise<number> {
             this.closed = true;
             return this.totalBytes;
           }
@@ -541,11 +541,11 @@ async function runBenchmarks(): Promise<void> {
             return this.totalBytes;
           }
 
-          async abort(): Promise<void> {
+          async fail(): Promise<void> {
             this.closed = true;
           }
 
-          abortSync(): boolean {
+          failSync(): boolean {
             this.closed = true;
             return true;
           }

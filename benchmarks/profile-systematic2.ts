@@ -142,7 +142,7 @@ async function main() {
     await Stream.pipeTo(Stream.from(chunks), {
       write(chunk) { total += chunk.length; },
       end() {},
-      abort() {},
+      fail() {},
     });
     if (total !== totalBytes) throw new Error('Wrong');
   });
@@ -152,7 +152,7 @@ async function main() {
     Stream.pipeToSync(Stream.fromSync(chunks), {
       write(chunk) { total += chunk.length; },
       end() {},
-      abort() {},
+      fail() {},
     });
     if (total !== totalBytes) throw new Error('Wrong');
   });

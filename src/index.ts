@@ -30,6 +30,7 @@ export type {
   Drainable,
 
   // Writer interfaces
+  WriteOptions,
   Writer,
   SyncWriter,
   ByteStreamReadable,
@@ -51,6 +52,7 @@ export type {
   TransformYield,
   TransformResult,
   AsyncTransformResult,
+  TransformOptions,
   TransformFn,
   StatefulTransformFn,
   TransformObject,

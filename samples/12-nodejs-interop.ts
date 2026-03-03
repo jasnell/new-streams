@@ -5,7 +5,7 @@
  * Includes proper error propagation and lifecycle management.
  */
 
-import { Stream, type Writer, type Transform } from '../src/index.js';
+import { Stream, type Writer, type WriteOptions, type Transform } from '../src/index.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -75,7 +75,7 @@ function fromNodeReadable(readable: Readable) {
  * Features:
  * - Proper backpressure handling (respects drain events)
  * - Error propagation from Node.js stream to writer
- * - Proper close/abort handling
+ * - Proper close/fail handling
  */
 function createNodeWriter(writable: Writable): Writer {
   let error: Error | null = null;
@@ -93,14 +93,26 @@ function createNodeWriter(writable: Writable): Writer {
     }
   });
 
-  // Helper to wait for drain
-  const waitForDrain = (): Promise<void> => {
-    return new Promise((resolve) => {
+  // Helper to wait for drain, optionally cancellable via signal
+  const waitForDrain = (signal?: AbortSignal): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(signal.reason);
+        return;
+      }
       drainResolve = resolve;
-      writable.once('drain', () => {
+      const onDrain = () => {
+        signal?.removeEventListener('abort', onAbort);
         drainResolve = null;
         resolve();
-      });
+      };
+      const onAbort = () => {
+        writable.removeListener('drain', onDrain);
+        drainResolve = null;
+        reject(signal!.reason);
+      };
+      writable.once('drain', onDrain);
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   };
 
@@ -109,7 +121,7 @@ function createNodeWriter(writable: Writable): Writer {
       return closed || error ? null : 16384; // Reasonable default
     },
 
-    async write(chunk: Uint8Array | string): Promise<void> {
+    async write(chunk: Uint8Array | string, options?: WriteOptions): Promise<void> {
       if (error) throw error;
       if (closed) throw new Error('Writer is closed');
 
@@ -120,14 +132,14 @@ function createNodeWriter(writable: Writable): Writer {
       byteCount += buffer.length;
 
       if (!canContinue) {
-        await waitForDrain();
+        await waitForDrain(options?.signal);
         if (error) throw error;
       }
     },
 
-    async writev(chunks: (Uint8Array | string)[]): Promise<void> {
+    async writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void> {
       for (const chunk of chunks) {
-        await this.write(chunk);
+        await this.write(chunk, options);
       }
     },
 
@@ -149,12 +161,19 @@ function createNodeWriter(writable: Writable): Writer {
       return true;
     },
 
-    async end(): Promise<number> {
+    async end(options?: WriteOptions): Promise<number> {
       if (error) throw error;
       closed = true;
 
       return new Promise<number>((resolve, reject) => {
+        if (options?.signal?.aborted) {
+          reject(options.signal.reason);
+          return;
+        }
+        const onAbort = () => reject(options!.signal!.reason);
+        options?.signal?.addEventListener('abort', onAbort, { once: true });
         writable.end(() => {
+          options?.signal?.removeEventListener('abort', onAbort);
           if (error) {
             reject(error);
           } else {
@@ -170,12 +189,12 @@ function createNodeWriter(writable: Writable): Writer {
       return byteCount;
     },
 
-    async abort(reason?: Error): Promise<void> {
+    async fail(reason?: Error): Promise<void> {
       closed = true;
       writable.destroy(reason);
     },
 
-    abortSync(reason?: Error): boolean {
+    failSync(reason?: Error): boolean {
       closed = true;
       writable.destroy(reason);
       return true;
@@ -354,10 +373,10 @@ async function main() {
       const writer = createNodeWriter(nodeWriter);
 
       // Write some data
-      await writer.write('before abort');
+      await writer.write('before fail');
 
-      // Abort the writer
-      await writer.abort(new Error('Intentional abort'));
+      // Fail the writer
+      await writer.fail(new Error('Intentional failure'));
 
       console.log('Node.js stream destroyed:', nodeWriter.destroyed);
     }

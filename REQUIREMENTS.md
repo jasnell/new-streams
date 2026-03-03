@@ -27,8 +27,8 @@ Creates a bonded writer and async iterable pair for push-based streaming.
 | PUSH-007 | Writer.end() signals end of stream | ✅ |
 | PUSH-008 | Writer.end() returns total bytes written | ✅ |
 | PUSH-009 | Writer.endSync() returns total bytes written | ✅ |
-| PUSH-010 | Writer.abort() signals error to consumer | ✅ |
-| PUSH-011 | Writer.abortSync() signals error synchronously | ✅ |
+| PUSH-010 | Writer.fail() signals error to consumer | ✅ |
+| PUSH-011 | Writer.failSync() signals error synchronously | ✅ |
 | PUSH-012 | Readable yields Uint8Array[] batches | ✅ |
 
 ### 1.2 Backpressure - desiredSize
@@ -38,7 +38,7 @@ Creates a bonded writer and async iterable pair for push-based streaming.
 | PUSH-020 | desiredSize reflects available buffer space | ✅ |
 | PUSH-021 | desiredSize is 0 when buffer is full | ✅ |
 | PUSH-022 | desiredSize is null after close | ✅ |
-| PUSH-023 | desiredSize is null after abort | ✅ |
+| PUSH-023 | desiredSize is null after fail | ✅ |
 | PUSH-024 | desiredSize is always >= 0 (never negative) | ✅ |
 
 ### 1.3 Backpressure - highWaterMark
@@ -75,6 +75,7 @@ Creates a bonded writer and async iterable pair for push-based streaming.
 |----|-------------|--------|
 | PUSH-060 | signal option aborts stream when signaled | ✅ |
 | PUSH-061 | Already-aborted signal creates errored stream | ✅ |
+| PUSH-062 | Write blocked on backpressure rejects on signal abort | �� |
 
 ### 1.7 Transforms
 
@@ -101,10 +102,10 @@ Creates a bonded writer and async iterable pair for push-based streaming.
 | PUSH-090 | Writer implements drainable protocol | ✅ |
 | PUSH-091 | ondrain returns resolved Promise<true> when desiredSize > 0 | ✅ |
 | PUSH-092 | ondrain returns null when desiredSize is null (writer closed) | ✅ |
-| PUSH-093 | ondrain returns null when desiredSize is null (writer aborted) | ✅ |
+| PUSH-093 | ondrain returns null when desiredSize is null (writer failed) | ✅ |
 | PUSH-094 | ondrain returns pending Promise when desiredSize === 0 | ✅ |
 | PUSH-095 | ondrain Promise resolves with false when writer closes while waiting | ✅ |
-| PUSH-096 | ondrain Promise rejects when writer aborts while waiting | ✅ |
+| PUSH-096 | ondrain Promise rejects when writer fails while waiting | ✅ |
 | PUSH-097 | Multiple drain waiters all resolve together | ✅ |
 | PUSH-098 | ondrain returns null for non-drainable objects | ✅ |
 | PUSH-099 | ondrain works with event source pattern | ✅ |
@@ -222,7 +223,7 @@ Creates pull-through pipelines with transforms.
 |----|-------------|--------|
 | PULL-030 | Supports stateful transform object | ✅ |
 | PULL-031 | Receives null flush signal at end | ✅ |
-| PULL-032 | Calls abort() on transform objects when error occurs | ✅ |
+| PULL-032 | Pipeline signal fires on transforms when error occurs | ✅ |
 
 ### 3.5 Options
 
@@ -253,15 +254,17 @@ Consumes source and writes to a writer with optional transforms.
 | ID | Requirement | Status |
 |----|-------------|--------|
 | WRITE-010 | preventClose keeps writer open on completion | ✅ |
-| WRITE-011 | preventAbort keeps writer from aborting on error | ✅ |
+| WRITE-011 | preventFail keeps writer from failing on error | ✅ |
 | WRITE-012 | Respects AbortSignal | ✅ |
 
 ### 4.3 Error Handling
 
 | ID | Requirement | Status |
 |----|-------------|--------|
-| WRITE-020 | Aborts writer on source error | ✅ |
+| WRITE-020 | Fails writer on source error | ✅ |
 | WRITE-021 | Throws if no writer provided | ✅ |
+| WRITE-025 | pipeTo passes signal to writer.write() | ✅ |
+| WRITE-026 | pipeTo passes signal to writer.end() | ✅ |
 
 ### 4.4 Special Cases
 
@@ -357,7 +360,7 @@ Push-model multi-consumer streaming.
 |----|-------------|--------|
 | BCAST-020 | Tracks total bytes written | ✅ |
 | BCAST-021 | Supports writev | ✅ |
-| BCAST-022 | Propagates errors via abort | ✅ |
+| BCAST-022 | Propagates errors via fail | ✅ |
 
 ### 6.4 Cancel
 
@@ -402,10 +405,10 @@ Push-model multi-consumer streaming.
 | BCAST-080 | Writer implements drainable protocol | ✅ |
 | BCAST-081 | ondrain returns resolved Promise<true> when desiredSize > 0 | ✅ |
 | BCAST-082 | ondrain returns null when desiredSize is null (writer closed) | ✅ |
-| BCAST-083 | ondrain returns null when desiredSize is null (writer aborted) | ✅ |
+| BCAST-083 | ondrain returns null when desiredSize is null (writer failed) | ✅ |
 | BCAST-084 | ondrain returns pending Promise when desiredSize === 0 | ✅ |
 | BCAST-085 | ondrain Promise resolves with false when writer closes while waiting | ✅ |
-| BCAST-086 | ondrain Promise rejects when writer aborts while waiting | ✅ |
+| BCAST-086 | ondrain Promise rejects when writer fails while waiting | ✅ |
 | BCAST-087 | Multiple drain waiters all resolve together | ✅ |
 
 ---
@@ -571,10 +574,10 @@ Symbols for custom type integration.
 
 | Category | Total | Covered |
 |----------|-------|---------|
-| Stream.push() | 45 | 45 |
+| Stream.push() | 46 | 45 |
 | Stream.from() / fromSync() | 26 | 26 |
 | Stream.pull() / pullSync() | 17 | 17 |
-| Stream.pipeTo() / pipeToSync() | 10 | 10 |
+| Stream.pipeTo() / pipeToSync() | 12 | 10 |
 | Consumer Functions | 27 | 27 |
 | Stream.broadcast() | 26 | 26 |
 | Stream.share() / shareSync() | 22 | 22 |
@@ -582,6 +585,6 @@ Symbols for custom type integration.
 | Stream.merge() | 7 | 7 |
 | Stream.tap() / tapSync() | 4 | 4 |
 | Protocol Symbols | 6 | 6 |
-| **Total** | **204** | **204** |
+| **Total** | **207** | **207** |
 
 **Coverage: 100%** of specified requirements are tested.

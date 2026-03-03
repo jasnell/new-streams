@@ -13,6 +13,7 @@ import {
   type TextSyncOptions,
   type MergeOptions,
   type Transform,
+  type TransformOptions,
   type SyncTransform,
   type ByteStreamReadable,
   type Drainable,
@@ -366,7 +367,10 @@ export type TapCallback = (chunks: Uint8Array[] | null) => void;
 /**
  * Async callback type for tap.
  */
-export type TapCallbackAsync = (chunks: Uint8Array[] | null) => void | Promise<void>;
+export type TapCallbackAsync = (
+  chunks: Uint8Array[] | null,
+  options: TransformOptions
+) => void | Promise<void>;
 
 /**
  * Create a pass-through transform that observes chunks without modifying them.
@@ -376,8 +380,8 @@ export type TapCallbackAsync = (chunks: Uint8Array[] | null) => void | Promise<v
  * @returns Transform that passes chunks through unchanged
  */
 export function tap(callback: TapCallbackAsync): Transform {
-  return async (chunks: Uint8Array[] | null) => {
-    await callback(chunks);
+  return async (chunks: Uint8Array[] | null, options: TransformOptions) => {
+    await callback(chunks, options);
     return chunks;
   };
 }
@@ -410,7 +414,7 @@ export function tapSync(callback: TapCallback): SyncTransform {
  *   - Promise resolves with `true` immediately if ready to write (desiredSize > 0)
  *   - Promise resolves with `true` when backpressure clears
  *   - Promise resolves with `false` if writer closes while waiting
- *   - Promise rejects if writer aborts while waiting
+ *   - Promise rejects if writer fails while waiting
  *   - Returns `null` if object doesn't implement the protocol or drain is not applicable
  * 
  * Note: Due to TOCTOU races, callers should still check desiredSize and

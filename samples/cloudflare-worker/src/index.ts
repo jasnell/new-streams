@@ -250,7 +250,7 @@ async function* createLoremStreamNewAPI(
  */
 function createBatchTransformNewAPI(): TransformObject {
   return {
-    transform: async function* (source) {
+    transform: async function* (source, _options) {
       let buffer = new Uint8Array(0);
 
       for await (const chunks of source) {
@@ -346,7 +346,7 @@ function createHashTap(): ReturnType<typeof Stream.tap> {
   let chunkIndex = 0;
   let totalBytes = 0;
 
-  return Stream.tap(async (chunks) => {
+  return Stream.tap(async (chunks, _options) => {
     if (chunks === null) {
       // Flush signal - log final stats
       console.log(

@@ -180,7 +180,7 @@ A `DuplexChannel` bundles a writer (sends to the peer) and a readable (receives 
 | Operation on detached channel | Behavior |
 |-------------------------------|----------|
 | `writer.write()` / `writev()` / `writeSync()` / `writevSync()` / `end()` / `endSync()` | Throws `TypeError` |
-| `writer.abort()` / `abortSync()` | No-op (cleanup methods, per Section 3.2) |
+| `writer.fail()` / `failSync()` | No-op (cleanup methods, per Section 3.2) |
 | `writer.desiredSize` | Returns `null` |
 | `readable[Symbol.asyncIterator]()` | Throws `TypeError` |
 | `close()` | No-op (cleanup method) |
@@ -382,7 +382,7 @@ interface PullOptions {
 interface PipeToOptions {
   signal?: AbortSignal;
   preventClose?: boolean;
-  preventAbort?: boolean;
+  preventFail?: boolean;
   transfer?: boolean;  // New
 }
 

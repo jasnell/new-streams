@@ -7,7 +7,7 @@
  * - Breaking from iteration triggers generator cleanup (finally blocks)
  * - AbortSignal can cancel long-running operations
  * - Broadcast and Share have .cancel() and Symbol.dispose
- * - Writers have explicit end()/abort() for cleanup
+ * - Writers have explicit end()/fail() for cleanup
  */
 
 import { Stream, type Writer } from '../src/index.js';
@@ -56,9 +56,9 @@ async function main() {
   }
 
   // ============================================================================
-  // Writer cleanup - end() vs abort()
+  // Writer cleanup - end() vs fail()
   // ============================================================================
-  section('Writer cleanup - end() vs abort()');
+  section('Writer cleanup - end() vs fail()');
 
   // Normal completion with end()
   {
@@ -75,7 +75,7 @@ async function main() {
     console.log('Normal end() - bytes:', bytesWritten, 'text:', text);
   }
 
-  // Abnormal termination with abort()
+  // Abnormal termination with fail()
   {
     const { writer, readable } = Stream.push();
 
@@ -83,10 +83,10 @@ async function main() {
     const textPromise = Stream.text(readable).catch((e) => `ERROR: ${(e as Error).message}`);
 
     await writer.write('partial data');
-    await writer.abort(new Error('Something went wrong'));
+    await writer.fail(new Error('Something went wrong'));
 
     const result = await textPromise;
-    console.log('After abort():', result);
+    console.log('After fail():', result);
   }
 
   // Sync writer cleanup
@@ -211,7 +211,7 @@ async function main() {
     const { writer, readable } = Stream.push();
 
     // Consumer in background
-    const textPromise = Stream.text(readable).catch(() => 'aborted');
+    const textPromise = Stream.text(readable).catch(() => 'failed');
 
     try {
       await writer.write('data 1');
@@ -221,8 +221,8 @@ async function main() {
       throw new Error('Processing error');
     } catch (e) {
       console.log('Caught error:', (e as Error).message);
-      // Abort writer on error
-      await writer.abort(e as Error);
+      // Fail writer on error
+      await writer.fail(e as Error);
     } finally {
       // Cleanup always runs
       console.log('Finally block executed');
@@ -416,7 +416,7 @@ async function main() {
       console.log('Caught:', (e as Error).message);
     }
 
-    // Writer should be aborted, not closed normally
+    // Writer should be failed, not closed normally
     console.log('Writer state - desiredSize:', writer.desiredSize);
   }
 

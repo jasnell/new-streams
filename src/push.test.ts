@@ -206,12 +206,12 @@ describe('push()', () => {
       assert.strictEqual(writer.desiredSize, null);
     });
 
-    // PUSH-023: desiredSize is null after abort
-    it('should be null after abort [PUSH-023]', async () => {
+    // PUSH-023: desiredSize is null after fail
+    it('should be null after fail [PUSH-023]', async () => {
       const { writer } = push();
 
       assert.strictEqual(writer.desiredSize, 1);
-      await writer.abort(new Error('test'));
+      await writer.fail(new Error('test'));
       assert.strictEqual(writer.desiredSize, null);
     });
   });
@@ -249,8 +249,8 @@ describe('push()', () => {
     });
   });
 
-  describe('abort() propagates error', () => {
-    // PUSH-010: Writer.abort() signals error to consumer
+  describe('fail() propagates error', () => {
+    // PUSH-010: Writer.fail() signals error to consumer
     it('should propagate error to consumer [PUSH-010]', async () => {
       const { writer, readable } = push();
 
@@ -260,19 +260,19 @@ describe('push()', () => {
       // Start consuming
       const promise = collect(readable);
 
-      // Abort with error
-      await writer.abort(error);
+      // Fail with error
+      await writer.fail(error);
 
       // Consumer should see the error
       await assert.rejects(promise, /test error/);
     });
 
-    // PUSH-011: Writer.abortSync() signals error synchronously
-    it('abortSync should work [PUSH-011]', async () => {
+    // PUSH-011: Writer.failSync() signals error synchronously
+    it('failSync should work [PUSH-011]', async () => {
       const { writer, readable } = push();
 
       writer.writeSync('hello');
-      writer.abortSync(new Error('sync error'));
+      writer.failSync(new Error('sync error'));
 
       await assert.rejects(collect(readable), /sync error/);
     });
@@ -392,8 +392,8 @@ describe('push()', () => {
         );
 
         // Clean up
-        await writer.abort(new Error('test cleanup'));
-        await pendingWrite.catch(() => {}); // Ignore abort error
+        await writer.fail(new Error('test cleanup'));
+        await pendingWrite.catch(() => {}); // Ignore fail error
       });
 
       // PUSH-040b: strict mode with higher highWaterMark allows more pending writes
@@ -722,11 +722,11 @@ describe('push()', () => {
       assert.strictEqual(drain, null);
     });
 
-    // PUSH-093: ondrain returns null when desiredSize is null (writer aborted)
-    it('should return null when desiredSize is null (writer aborted) [PUSH-093]', async () => {
+    // PUSH-093: ondrain returns null when desiredSize is null (writer failed)
+    it('should return null when desiredSize is null (writer failed) [PUSH-093]', async () => {
       const { writer } = push();
       
-      await writer.abort(new Error('test'));
+      await writer.fail(new Error('test'));
       assert.strictEqual(writer.desiredSize, null);
       
       const drain = ondrain(writer);
@@ -783,8 +783,8 @@ describe('push()', () => {
       assert.strictEqual(result, false);
     });
 
-    // PUSH-096: ondrain Promise rejects when writer aborts while waiting
-    it('should reject when writer aborts while waiting [PUSH-096]', async () => {
+    // PUSH-096: ondrain Promise rejects when writer fails while waiting
+    it('should reject when writer fails while waiting [PUSH-096]', async () => {
       const { writer } = push({ highWaterMark: 1 });
       
       // Fill the buffer
@@ -794,12 +794,12 @@ describe('push()', () => {
       const drain = ondrain(writer);
       assert.ok(drain !== null);
       
-      // Abort the writer while waiting
-      const error = new Error('abort error');
-      await writer.abort(error);
+      // Fail the writer while waiting
+      const error = new Error('fail error');
+      await writer.fail(error);
       
       // Should reject with the error
-      await assert.rejects(drain, /abort error/);
+      await assert.rejects(drain, /fail error/);
     });
 
     // PUSH-097: Multiple drain waiters all resolve together
@@ -904,6 +904,196 @@ describe('push()', () => {
       
       assert.strictEqual(received.join(''), 'abcde');
       assert.ok(pauseCount > 0, 'Expected at least one pause for backpressure');
+    });
+  });
+
+  describe('write signal cancellation', () => {
+    // PUSH-062: Write blocked on backpressure rejects on signal abort (strict)
+    it('should reject blocked write when signal fires (strict) [PUSH-062]', async () => {
+      const { writer, readable } = push({ highWaterMark: 1, backpressure: 'strict' });
+
+      // Fill buffer
+      writer.writeSync('first');
+      assert.strictEqual(writer.desiredSize, 0);
+
+      // Start a write that will block on backpressure, with a signal
+      const controller = new AbortController();
+      const writePromise = writer.write('second', { signal: controller.signal });
+
+      // Abort the signal
+      controller.abort();
+
+      // Write should reject
+      await assert.rejects(writePromise, /Abort/);
+
+      // Writer should still be usable (per-operation cancellation, not terminal)
+      assert.strictEqual(writer.desiredSize, 0);
+
+      // Read to make space, then write again successfully
+      const iter = readable[Symbol.asyncIterator]();
+      await iter.next(); // read 'first'
+      assert.strictEqual(writer.desiredSize, 1);
+      await writer.write('third');
+      await writer.end();
+      await iter.return?.();
+    });
+
+    // PUSH-062b: Write blocked on backpressure rejects on signal abort (block)
+    it('should reject blocked write when signal fires (block) [PUSH-062b]', async () => {
+      const { writer } = push({ highWaterMark: 1, backpressure: 'block' });
+
+      // Fill buffer
+      writer.writeSync('first');
+
+      // Blocked write with signal
+      const controller = new AbortController();
+      const writePromise = writer.write('second', { signal: controller.signal });
+
+      controller.abort();
+      await assert.rejects(writePromise, /Abort/);
+
+      await writer.end();
+    });
+
+    // PUSH-063: Pre-aborted signal rejects write immediately
+    it('should reject immediately with pre-aborted signal [PUSH-063]', async () => {
+      const { writer } = push({ highWaterMark: 10 });
+
+      const controller = new AbortController();
+      controller.abort();
+
+      // Even though buffer has space, pre-aborted signal rejects
+      await assert.rejects(
+        writer.write('hello', { signal: controller.signal }),
+        /Abort/
+      );
+
+      // Writer still usable
+      await writer.write('world');
+      await writer.end();
+    });
+
+    // PUSH-064: Signal listener cleaned up on normal write completion
+    it('should clean up signal listener on normal write completion [PUSH-064]', async () => {
+      const { writer, readable } = push({ highWaterMark: 1, backpressure: 'block' });
+
+      // Fill buffer
+      writer.writeSync('first');
+
+      const controller = new AbortController();
+      const writePromise = writer.write('second', { signal: controller.signal });
+
+      // Read to unblock the write
+      const iter = readable[Symbol.asyncIterator]();
+      await iter.next();
+
+      // Write should complete normally
+      await writePromise;
+
+      // Aborting after completion should not cause issues
+      controller.abort();
+
+      await writer.end();
+      await iter.return?.();
+    });
+
+    // PUSH-065: end() accepts WriteOptions (interface compliance)
+    it('should accept WriteOptions on end() [PUSH-065]', async () => {
+      const { writer } = push({ highWaterMark: 10 });
+      await writer.write('hello');
+      const total = await writer.end({ signal: undefined });
+      assert.strictEqual(total, 5);
+    });
+
+    // PUSH-066: writev with signal rejects on abort
+    it('should reject blocked writev when signal fires [PUSH-066]', async () => {
+      const { writer } = push({ highWaterMark: 1, backpressure: 'block' });
+
+      writer.writeSync('first');
+
+      const controller = new AbortController();
+      const writevPromise = writer.writev(['a', 'b'], { signal: controller.signal });
+
+      controller.abort();
+      await assert.rejects(writevPromise, /Abort/);
+
+      await writer.end();
+    });
+
+    // PUSH-067: Cancelled write is removed from pending queue (doesn't occupy slot)
+    it('should remove cancelled write from pending queue [PUSH-067]', async () => {
+      const { writer, readable } = push({ highWaterMark: 1, backpressure: 'strict' });
+
+      // Fill buffer
+      writer.writeSync('first');
+
+      // Start a write with signal, then cancel it
+      const controller = new AbortController();
+      const writePromise = writer.write('cancelled', { signal: controller.signal });
+      controller.abort();
+      await writePromise.catch(() => {});
+
+      // The cancelled write should NOT occupy a pending slot.
+      // A new write should be able to queue without backpressure violation.
+      const iter = readable[Symbol.asyncIterator]();
+      await iter.next(); // drain 'first'
+
+      // This should succeed — the slot freed by cancellation
+      await writer.write('replacement');
+      await writer.end();
+      await iter.return?.();
+    });
+  });
+
+  describe('drain cleanup on consumer termination', () => {
+    // PUSH-100: ondrain resolves with false when consumer breaks while drain is pending
+    it('should resolve pending drain with false when consumer breaks [PUSH-100]', async () => {
+      const { writer, readable } = push({ highWaterMark: 1 });
+
+      // Fill the buffer so desiredSize = 0
+      writer.writeSync('hello');
+      assert.strictEqual(writer.desiredSize, 0);
+
+      // Also queue a pending write so that reading one chunk
+      // doesn't clear backpressure (the pending write refills the slot)
+      const pendingWrite = writer.write('world');
+
+      // Start a drain wait — still at capacity
+      const drain = ondrain(writer);
+      assert.ok(drain !== null);
+
+      // Consumer returns without draining enough to clear backpressure
+      const iter = readable[Symbol.asyncIterator]();
+      await iter.return?.();
+
+      const result = await drain;
+      assert.strictEqual(result, false, 'Drain should resolve with false when consumer breaks');
+      await pendingWrite.catch(() => {}); // ignore write rejection
+    });
+
+    // PUSH-101: ondrain rejects when consumer throws while drain is pending
+    it('should reject pending drain when consumer throws [PUSH-101]', async () => {
+      const { writer, readable } = push({ highWaterMark: 1 });
+
+      // Fill the buffer so desiredSize = 0
+      writer.writeSync('hello');
+      assert.strictEqual(writer.desiredSize, 0);
+
+      // Also queue a pending write so that reading one chunk
+      // doesn't clear backpressure (the pending write refills the slot)
+      const pendingWrite = writer.write('world');
+
+      // Start a drain wait — still at capacity
+      const drain = ondrain(writer);
+      assert.ok(drain !== null);
+
+      // Consumer throws via iterator.throw() before draining enough
+      // to clear backpressure. The drain should reject.
+      const iter = readable[Symbol.asyncIterator]();
+      await iter.throw?.(new Error('consumer error'));
+
+      await assert.rejects(drain, /consumer error/);
+      await pendingWrite.catch(() => {}); // ignore write rejection
     });
   });
 });

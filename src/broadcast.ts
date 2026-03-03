@@ -7,6 +7,7 @@
 
 import {
   type Writer,
+  type WriteOptions,
   type Broadcast as BroadcastInterface,
   type BroadcastOptions,
   type BroadcastResult,
@@ -24,6 +25,10 @@ import { pull as pullWithTransforms } from './pull.js';
 
 // Shared TextEncoder instance
 const encoder = new TextEncoder();
+
+// Non-exported symbol for internal cancel notification from BroadcastImpl to BroadcastWriter.
+// Because this symbol is not exported, external code cannot call it.
+const cancelWriter = Symbol('cancelWriter');
 
 // =============================================================================
 // Argument Parsing Helpers
@@ -93,7 +98,15 @@ class BroadcastImpl implements BroadcastInterface {
   /** Callback invoked when buffer space becomes available (for pending writes) */
   _onBufferDrained: (() => void) | null = null;
 
+  /** Reference to writer for cancel notification */
+  private writer?: { [cancelWriter](): void };
+
   constructor(private options: Required<BroadcastOptions>) {}
+
+  /** Register the writer for cancel notification. */
+  setWriter(w: { [cancelWriter](): void }): void {
+    this.writer = w;
+  }
 
   get consumerCount(): number {
     return this.consumers.size;
@@ -146,6 +159,8 @@ class BroadcastImpl implements BroadcastInterface {
         return {
           async next(): Promise<IteratorResult<Uint8Array[]>> {
             if (state.detached) {
+              // If detached due to an error, throw the error
+              if (self.error) throw self.error;
               return { done: true, value: undefined };
             }
 
@@ -201,15 +216,20 @@ class BroadcastImpl implements BroadcastInterface {
   }
 
   /**
-   * Cancel all consumers.
+   * Cancel all consumers and reject pending writes on the writer.
+   * Sets ended=true so that subsequent _abort() calls early-return.
    */
   cancel(reason?: Error): void {
     if (this.cancelled) return;
     this.cancelled = true;
+    this.ended = true; // Prevents _abort() from redundantly iterating consumers
 
     if (reason) {
       this.error = reason;
     }
+
+    // Reject pending writes on the writer so the pump doesn't hang
+    this.writer?.[cancelWriter]();
 
     // Notify all waiting consumers
     for (const consumer of this.consumers) {
@@ -301,21 +321,23 @@ class BroadcastImpl implements BroadcastInterface {
   }
 
   /**
-   * Signal error.
+   * Signal error. Notifies all consumers and detaches them.
    */
   _abort(reason: Error): void {
     if (this.ended || this.error) return;
     this.error = reason;
     this.ended = true;
 
-    // Notify all waiting consumers
+    // Notify all waiting consumers and detach them
     for (const consumer of this.consumers) {
       if (consumer.reject) {
         consumer.reject(reason);
         consumer.resolve = null;
         consumer.reject = null;
       }
+      consumer.detached = true;
     }
+    this.consumers.clear();
   }
 
   /**
@@ -436,7 +458,7 @@ class BroadcastWriter implements Writer, Drainable {
    * @returns Promise<true> immediately if desiredSize > 0
    * @returns Promise<true> when backpressure clears
    * @returns Promise<false> if writer closes while waiting
-   * @throws if writer aborts while waiting
+   * @throws if writer fails while waiting
    */
   [drainableProtocol](): Promise<boolean> | null {
     const desired = this.desiredSize;
@@ -462,11 +484,18 @@ class BroadcastWriter implements Writer, Drainable {
     return this.broadcast._getDesiredSize();
   }
 
-  async write(chunk: Uint8Array | string): Promise<void> {
-    return this.writev([chunk]);
+  async write(chunk: Uint8Array | string, options?: WriteOptions): Promise<void> {
+    return this.writev([chunk], options);
   }
 
-  async writev(chunks: (Uint8Array | string)[]): Promise<void> {
+  async writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void> {
+    const signal = options?.signal;
+
+    // Check for pre-aborted signal
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+    }
+
     if (this.closed || this.aborted) {
       throw new Error('Writer is closed');
     }
@@ -498,14 +527,43 @@ class BroadcastWriter implements Writer, Drainable {
         );
       }
       // Otherwise, queue this write and wait for space
-      return new Promise((resolve, reject) => {
-        this.pendingWrites.push({ chunk: converted, resolve, reject });
-      });
+      return this.createPendingWrite(converted, signal);
     }
 
     // 'block' policy - wait for space (unbounded pending writes)
-    return new Promise((resolve, reject) => {
-      this.pendingWrites.push({ chunk: converted, resolve, reject });
+    return this.createPendingWrite(converted, signal);
+  }
+
+  /**
+   * Create a pending write promise, optionally racing against a signal.
+   * Same pattern as PushQueue.createPendingWrite().
+   */
+  private createPendingWrite(chunk: Uint8Array[], signal?: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const entry: PendingBroadcastWrite = { chunk, resolve, reject };
+      this.pendingWrites.push(entry);
+
+      if (!signal) return;
+
+      const onAbort = () => {
+        const idx = this.pendingWrites.indexOf(entry);
+        if (idx !== -1) this.pendingWrites.splice(idx, 1);
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      };
+
+      // Wrap resolve/reject to clean up signal listener
+      const origResolve = entry.resolve;
+      const origReject = entry.reject;
+      entry.resolve = () => {
+        signal.removeEventListener('abort', onAbort);
+        origResolve();
+      };
+      entry.reject = (reason: Error) => {
+        signal.removeEventListener('abort', onAbort);
+        origReject(reason);
+      };
+
+      signal.addEventListener('abort', onAbort, { once: true });
     });
   }
 
@@ -598,7 +656,8 @@ class BroadcastWriter implements Writer, Drainable {
     return false;
   }
 
-  async end(): Promise<number> {
+  async end(options?: WriteOptions): Promise<number> {
+    // end() is synchronous internally — signal accepted for interface compliance.
     if (this.closed) return this.totalBytes;
     this.closed = true;
     this.broadcast._end();
@@ -616,27 +675,40 @@ class BroadcastWriter implements Writer, Drainable {
     return this.totalBytes;
   }
 
-  async abort(reason?: Error): Promise<void> {
+  async fail(reason?: Error): Promise<void> {
     if (this.aborted) return;
     this.aborted = true;
     this.closed = true;
-    const error = reason ?? new Error('Aborted');
+    const error = reason ?? new Error('Failed');
     this.rejectPendingWrites(error);
     // Reject pending drains with the error
     this.rejectPendingDrains(error);
     this.broadcast._abort(error);
   }
 
-  abortSync(reason?: Error): boolean {
+  failSync(reason?: Error): boolean {
     if (this.aborted) return true;
     this.aborted = true;
     this.closed = true;
-    const error = reason ?? new Error('Aborted');
+    const error = reason ?? new Error('Failed');
     this.rejectPendingWrites(error);
     // Reject pending drains with the error
     this.rejectPendingDrains(error);
     this.broadcast._abort(error);
     return true;
+  }
+
+  /**
+   * Internal cancel notification from BroadcastImpl.cancel().
+   * Rejects pending writes and marks writer closed so the pump can exit.
+   */
+  [cancelWriter](): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.rejectPendingWrites(
+      new DOMException('Broadcast cancelled', 'AbortError')
+    );
+    this.resolvePendingDrains(false);
   }
 }
 
@@ -659,6 +731,7 @@ export function broadcast(options?: BroadcastOptions): BroadcastResult {
 
   const broadcastImpl = new BroadcastImpl(opts);
   const writer = new BroadcastWriter(broadcastImpl);
+  broadcastImpl.setWriter(writer);
 
   // Handle abort signal - cancel without error (clean shutdown)
   if (opts.signal) {
@@ -710,26 +783,39 @@ export const Broadcast = {
 
     // Create broadcast and pump from source
     const result = broadcast(options);
+    const signal = options?.signal;
 
     // Start pumping in background
     (async () => {
       try {
         if (isAsyncIterable(input)) {
           for await (const chunks of input as AsyncIterable<unknown>) {
+            if (signal?.aborted) {
+              throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+            }
             if (Array.isArray(chunks)) {
-              await result.writer.writev(chunks as (Uint8Array | string)[]);
+              await result.writer.writev(
+                chunks as (Uint8Array | string)[],
+                signal ? { signal } : undefined
+              );
             }
           }
         } else if (isSyncIterable(input)) {
           for (const chunks of input as Iterable<unknown>) {
+            if (signal?.aborted) {
+              throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+            }
             if (Array.isArray(chunks)) {
-              await result.writer.writev(chunks as (Uint8Array | string)[]);
+              await result.writer.writev(
+                chunks as (Uint8Array | string)[],
+                signal ? { signal } : undefined
+              );
             }
           }
         }
-        await result.writer.end();
+        await result.writer.end(signal ? { signal } : undefined);
       } catch (error) {
-        await result.writer.abort(
+        await result.writer.fail(
           error instanceof Error ? error : new Error(String(error))
         );
       }

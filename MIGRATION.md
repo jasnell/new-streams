@@ -169,7 +169,7 @@ websocket.onmessage = (e) => {
   writer.write(e.data);  // Strings auto-encoded
 };
 websocket.onclose = () => writer.end();
-websocket.onerror = (e) => writer.abort(e);
+websocket.onerror = (e) => writer.fail(e);
 
 // Consumer reads from 'readable'
 const text = await Stream.text(readable);
@@ -569,7 +569,7 @@ await readable.pipeTo(writable, {
 ```javascript
 await Stream.pipeTo(source, writer, {
   preventClose: true,
-  preventAbort: true,
+  preventFail: true,
   signal: abortController.signal
 });
 ```
@@ -696,11 +696,11 @@ await writer.abort(new Error('Something went wrong'));
 
 **New Stream API:**
 ```javascript
-// Abort propagates error to consumer
-await writer.abort(new Error('Something went wrong'));
+// Fail propagates error to consumer
+await writer.fail(new Error('Something went wrong'));
 
 // Or sync version
-writer.abortSync(new Error('Something went wrong'));
+writer.failSync(new Error('Something went wrong'));
 ```
 
 ---

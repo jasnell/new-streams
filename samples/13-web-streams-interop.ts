@@ -9,7 +9,7 @@
  * with proper error propagation and lifecycle management.
  */
 
-import { Stream, type Writer, type Transform } from '../src/index.js';
+import { Stream, type Writer, type WriteOptions, type Transform } from '../src/index.js';
 import { section, uppercaseTransform } from './util.js';
 
 // Shared encoder/decoder instances for efficiency
@@ -128,7 +128,7 @@ function toReadableStream(source: AsyncIterable<Uint8Array[]>): ReadableStream<U
  * Features:
  * - Proper backpressure handling (waits for ready)
  * - Error propagation
- * - Proper close/abort handling
+ * - Proper close/fail handling
  */
 function createWebWriter(writable: WritableStream<Uint8Array>): Writer {
   const webWriter = writable.getWriter();
@@ -140,17 +140,18 @@ function createWebWriter(writable: WritableStream<Uint8Array>): Writer {
       return closed ? null : webWriter.desiredSize ?? 16384;
     },
 
-    async write(chunk: Uint8Array | string): Promise<void> {
+    async write(chunk: Uint8Array | string, options?: WriteOptions): Promise<void> {
       if (closed) throw new Error('Writer is closed');
+      options?.signal?.throwIfAborted();
       await webWriter.ready;
       const bytes = typeof chunk === 'string' ? encoder.encode(chunk) : chunk;
       await webWriter.write(bytes);
       byteCount += bytes.byteLength;
     },
 
-    async writev(chunks: (Uint8Array | string)[]): Promise<void> {
+    async writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void> {
       for (const chunk of chunks) {
-        await this.write(chunk);
+        await this.write(chunk, options);
       }
     },
 
@@ -163,7 +164,8 @@ function createWebWriter(writable: WritableStream<Uint8Array>): Writer {
       return false;
     },
 
-    async end(): Promise<number> {
+    async end(options?: WriteOptions): Promise<number> {
+      options?.signal?.throwIfAborted();
       closed = true;
       await webWriter.close();
       return byteCount;
@@ -173,12 +175,12 @@ function createWebWriter(writable: WritableStream<Uint8Array>): Writer {
       return -1; // Not supported
     },
 
-    async abort(reason?: Error): Promise<void> {
+    async fail(reason?: Error): Promise<void> {
       closed = true;
       await webWriter.abort(reason);
     },
 
-    abortSync(reason?: Error): boolean {
+    failSync(reason?: Error): boolean {
       return false; // Not supported
     },
   };
@@ -211,7 +213,7 @@ function toWritableStream(options?: { highWaterMark?: number }): {
     },
 
     async abort(reason) {
-      await writer.abort(reason);
+      await writer.fail(reason);
     },
   });
 

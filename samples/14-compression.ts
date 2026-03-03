@@ -9,7 +9,7 @@
  * - Using async generators in transforms to yield compressed data
  * - Using Stream.pipeTo() to write through compression
  * - Multi-stage processing with variadic transforms
- * - Proper error handling and abort support
+ * - Proper error handling and failure propagation
  */
 
 import { Stream, type TransformObject } from '../src/index.js';
@@ -33,8 +33,8 @@ function copyToBuffer(chunk: Uint8Array): Buffer {
 //
 // These implement TransformObject interface with:
 // - transform(source): receives entire source as async iterable, yields compressed output
-// - abort(reason): cleans up the zlib stream on error
 //
+// The transform's signal parameter enables cleanup on failure or cancellation.
 // Using an object (vs a plain function) indicates this is a stateful transform.
 // ============================================================================
 
@@ -116,28 +116,34 @@ function createGzipCompressTransform(options?: zlib.ZlibOptions): TransformObjec
 
   return {
 
-    async *transform(source: AsyncIterable<Uint8Array[] | null>) {
-      for await (const batches of source) {
-        if (batches === null) {
-          // Flush signal
-          const output = await processChunk(null);
-          for (const chunk of output) {
-            yield chunk;
-          }
-          continue;
-        }
-        // Process each chunk in the batch
-        for (const chunk of batches) {
-          const output = await processChunk(chunk);
-          for (const out of output) {
-            yield out;
-          }
-        }
-      }
-    },
+    async *transform(source: AsyncIterable<Uint8Array[] | null>, { signal }: { signal: AbortSignal }) {
+      const onAbort = () => {
+        gzip.destroy(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
 
-    abort(reason) {
-      gzip.destroy(reason instanceof Error ? reason : new Error(String(reason)));
+      try {
+        for await (const batches of source) {
+          if (batches === null) {
+            // Flush signal
+            const output = await processChunk(null);
+            for (const chunk of output) {
+              yield chunk;
+            }
+            continue;
+          }
+          // Process each chunk in the batch
+          for (const chunk of batches) {
+            const output = await processChunk(chunk);
+            for (const out of output) {
+              yield out;
+            }
+          }
+        }
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+        gzip.destroy();
+      }
     },
   };
 }
@@ -214,26 +220,32 @@ function createGunzipTransform(options?: zlib.ZlibOptions): TransformObject {
 
   return {
 
-    async *transform(source: AsyncIterable<Uint8Array[] | null>) {
-      for await (const batches of source) {
-        if (batches === null) {
-          const output = await processChunk(null);
-          for (const chunk of output) {
-            yield chunk;
-          }
-          continue;
-        }
-        for (const chunk of batches) {
-          const output = await processChunk(chunk);
-          for (const out of output) {
-            yield out;
-          }
-        }
-      }
-    },
+    async *transform(source: AsyncIterable<Uint8Array[] | null>, { signal }: { signal: AbortSignal }) {
+      const onAbort = () => {
+        gunzip.destroy(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
 
-    abort(reason) {
-      gunzip.destroy(reason instanceof Error ? reason : new Error(String(reason)));
+      try {
+        for await (const batches of source) {
+          if (batches === null) {
+            const output = await processChunk(null);
+            for (const chunk of output) {
+              yield chunk;
+            }
+            continue;
+          }
+          for (const chunk of batches) {
+            const output = await processChunk(chunk);
+            for (const out of output) {
+              yield out;
+            }
+          }
+        }
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+        gunzip.destroy();
+      }
     },
   };
 }
@@ -312,26 +324,32 @@ function createZlibTransformObject(
 
   return {
 
-    async *transform(source: AsyncIterable<Uint8Array[] | null>) {
-      for await (const batches of source) {
-        if (batches === null) {
-          const output = await processChunk(null);
-          for (const chunk of output) {
-            yield chunk;
-          }
-          continue;
-        }
-        for (const chunk of batches) {
-          const output = await processChunk(chunk);
-          for (const out of output) {
-            yield out;
-          }
-        }
-      }
-    },
+    async *transform(source: AsyncIterable<Uint8Array[] | null>, { signal }: { signal: AbortSignal }) {
+      const onAbort = () => {
+        zlibStream.destroy(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
 
-    abort(reason) {
-      zlibStream.destroy(reason instanceof Error ? reason : new Error(String(reason)));
+      try {
+        for await (const batches of source) {
+          if (batches === null) {
+            const output = await processChunk(null);
+            for (const chunk of output) {
+              yield chunk;
+            }
+            continue;
+          }
+          for (const chunk of batches) {
+            const output = await processChunk(chunk);
+            for (const out of output) {
+              yield out;
+            }
+          }
+        }
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+        zlibStream.destroy();
+      }
     },
   };
 }
@@ -597,12 +615,12 @@ async function main() {
   }
 
   // ============================================================================
-  // Example 9: Error handling with transform abort()
+  // Example 9: Error handling with transform signal
   // ============================================================================
-  section('Example 9: Error Handling with Transform abort()');
+  section('Example 9: Error Handling with Transform Signal');
 
   {
-    // Try to decompress invalid data - transform's abort() should be called
+    // Try to decompress invalid data - transform's signal should fire
     try {
       await Stream.bytes(
         Stream.pull(Stream.from(new Uint8Array([1, 2, 3, 4, 5])), createGunzipTransform())

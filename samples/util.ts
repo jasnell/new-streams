@@ -1,4 +1,4 @@
-import { type Writer, type SyncWriter } from '../src/index.js';
+import { type Writer, type SyncWriter, type WriteOptions } from '../src/index.js';
 
 export const kHeader = `${ '='.repeat(60) }`;
 
@@ -36,14 +36,14 @@ export class MemoryWriter implements Writer {
     return this._closed ? null : 100;
   }
 
-  async write(chunk: Uint8Array | string): Promise<void> {
+  async write(chunk: Uint8Array | string, _options?: WriteOptions): Promise<void> {
     if (this._closed) throw new Error('Writer is closed');
     const bytes = typeof chunk === 'string' ? this.enc.encode(chunk) : chunk;
     this.chunks.push(bytes);
     this._byteCount += bytes.byteLength;
   }
 
-  async writev(chunks: (Uint8Array | string)[]): Promise<void> {
+  async writev(chunks: (Uint8Array | string)[], _options?: WriteOptions): Promise<void> {
     for (const chunk of chunks) {
       await this.write(chunk);
     }
@@ -64,7 +64,7 @@ export class MemoryWriter implements Writer {
     return true;
   }
 
-  async end(): Promise<number> {
+  async end(_options?: WriteOptions): Promise<number> {
     this._closed = true;
     return this._byteCount;
   }
@@ -74,11 +74,11 @@ export class MemoryWriter implements Writer {
     return this._byteCount;
   }
 
-  async abort(reason?: Error): Promise<void> {
+  async fail(reason?: Error): Promise<void> {
     this._closed = true;
   }
 
-  abortSync(reason?: Error): boolean {
+  failSync(reason?: Error): boolean {
     this._closed = true;
     return true;
   }
@@ -117,7 +117,7 @@ export class SyncMemoryWriter implements SyncWriter {
     return this._byteCount;
   }
 
-  abort(reason?: Error): void {
+  fail(reason?: Error): void {
     this._closed = true;
   }
 

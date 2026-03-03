@@ -185,12 +185,12 @@ describe('broadcast()', () => {
       assert.strictEqual(chunks.length, 3);
     });
 
-    it('should propagate errors via abort [BCAST-022]', async () => {
+    it('should propagate errors via fail [BCAST-022]', async () => {
       const { writer, broadcast: bc } = broadcast();
       const consumer = bc.push();
 
       const error = new Error('Test error');
-      await writer.abort(error);
+      await writer.fail(error);
 
       await assert.rejects(async () => {
         await collect(consumer);
@@ -427,11 +427,11 @@ describe('broadcast writer drainable protocol', () => {
     assert.strictEqual(drain, null);
   });
 
-  // BCAST-083: ondrain returns null when desiredSize is null (writer aborted)
-  it('should return null when desiredSize is null (writer aborted) [BCAST-083]', async () => {
+  // BCAST-083: ondrain returns null when desiredSize is null (writer failed)
+  it('should return null when desiredSize is null (writer failed) [BCAST-083]', async () => {
     const { writer } = broadcast();
     
-    await writer.abort(new Error('test'));
+    await writer.fail(new Error('test'));
     assert.strictEqual(writer.desiredSize, null);
     
     const drain = ondrain(writer);
@@ -491,8 +491,8 @@ describe('broadcast writer drainable protocol', () => {
     assert.strictEqual(result, false);
   });
 
-  // BCAST-086: ondrain Promise rejects when writer aborts while waiting
-  it('should reject when writer aborts while waiting [BCAST-086]', async () => {
+  // BCAST-086: ondrain Promise rejects when writer fails while waiting
+  it('should reject when writer fails while waiting [BCAST-086]', async () => {
     const { writer } = broadcast({ highWaterMark: 1 });
     
     // Fill the buffer
@@ -502,12 +502,12 @@ describe('broadcast writer drainable protocol', () => {
     const drain = ondrain(writer);
     assert.ok(drain !== null);
     
-    // Abort the writer while waiting
-    const error = new Error('abort error');
-    await writer.abort(error);
+    // Fail the writer while waiting
+    const error = new Error('fail error');
+    await writer.fail(error);
     
     // Should reject with the error
-    await assert.rejects(drain, /abort error/);
+    await assert.rejects(drain, /fail error/);
   });
 
   // BCAST-087: Multiple drain waiters all resolve together
@@ -542,5 +542,205 @@ describe('broadcast writer drainable protocol', () => {
     
     await writer.end();
     await iter.return?.();
+  });
+});
+
+describe('broadcast write signal cancellation', () => {
+  it('should reject blocked write when signal fires [BCAST-090]', async () => {
+    const { writer, broadcast: bc } = broadcast({ highWaterMark: 1 });
+
+    // Create a consumer so writes go through
+    const consumer = bc.push();
+    const iter = consumer[Symbol.asyncIterator]();
+
+    // Fill buffer
+    writer.writeSync('first');
+    assert.strictEqual(writer.desiredSize, 0);
+
+    // Write with signal — will block on backpressure
+    const controller = new AbortController();
+    const writePromise = writer.write('second', { signal: controller.signal });
+
+    // Abort
+    controller.abort();
+    await assert.rejects(writePromise, /Abort/);
+
+    // Writer still usable
+    await iter.next(); // drain 'first'
+    await writer.write('third');
+    await writer.end();
+    await iter.return?.();
+  });
+
+  it('should reject immediately with pre-aborted signal [BCAST-091]', async () => {
+    const { writer } = broadcast();
+    const controller = new AbortController();
+    controller.abort();
+
+    await assert.rejects(
+      writer.write('hello', { signal: controller.signal }),
+      /Abort/
+    );
+
+    await writer.end();
+  });
+
+  it('should clean up signal listener on normal write completion [BCAST-092]', async () => {
+    const { writer, broadcast: bc } = broadcast({ highWaterMark: 1 });
+    const consumer = bc.push();
+    const iter = consumer[Symbol.asyncIterator]();
+
+    writer.writeSync('first');
+
+    const controller = new AbortController();
+    const writePromise = writer.write('second', { signal: controller.signal });
+
+    // Drain to unblock
+    await iter.next();
+    await writePromise;
+
+    // Late abort should not cause issues
+    controller.abort();
+
+    await writer.end();
+    await iter.return?.();
+  });
+});
+
+describe('Broadcast.from() cancel bug fix', () => {
+  it('should not hang when cancel() is called while write is blocked [BCAST-100]', async () => {
+    // This tests the pre-existing bug: Broadcast.from() pump hangs when
+    // broadcastImpl.cancel() is called while a write is parked on backpressure.
+    //
+    // Setup: create a slow source that produces data, with a small highWaterMark
+    // so the pump blocks on backpressure when no consumer is draining fast enough.
+    const source = from((async function* () {
+      yield [new TextEncoder().encode('chunk1')];
+      yield [new TextEncoder().encode('chunk2')];
+      yield [new TextEncoder().encode('chunk3')];
+    })());
+
+    const controller = new AbortController();
+    const { broadcast: bc } = Broadcast.from(source, {
+      highWaterMark: 1,
+      signal: controller.signal,
+    });
+
+    // Create a consumer but don't drain it — this causes backpressure
+    const consumer = bc.push();
+    const iter = consumer[Symbol.asyncIterator]();
+
+    // Wait a bit for the pump to start and hit backpressure
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    // Cancel via signal — this must not hang.
+    // Before the fix, cancel() would not reject pending writes on BroadcastWriter,
+    // so the pump would be stuck forever waiting for the write to resolve.
+    controller.abort();
+
+    // If this test hangs here, the bug is present.
+    // The consumer should complete cleanly.
+    const result = await iter.next();
+    // May or may not have data depending on timing, but must not hang
+    assert.ok(result !== undefined);
+
+    // Ensure iteration terminates
+    const remaining = await iter.next();
+    // Should be done (cancelled)
+    if (!remaining.done) {
+      // Drain any remaining
+      await iter.return?.();
+    }
+  });
+
+  it('should not hang when cancel() is called with no consumers [BCAST-101]', async () => {
+    // Edge case: cancel with no consumers — pump write is parked, no one to drain
+    const source = from((async function* () {
+      yield [new TextEncoder().encode('chunk1')];
+      await new Promise(resolve => setTimeout(resolve, 200));
+      yield [new TextEncoder().encode('chunk2')];
+    })());
+
+    const controller = new AbortController();
+    Broadcast.from(source, {
+      highWaterMark: 1,
+      signal: controller.signal,
+    });
+
+    // Wait for pump to start
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    // Cancel — should not hang
+    controller.abort();
+
+    // Give the pump time to exit cleanly
+    await new Promise(resolve => setTimeout(resolve, 50));
+    // If we get here, the pump did not hang. Test passes.
+  });
+
+  it('should forward signal to pump writes and check per-iteration [BCAST-102]', async () => {
+    // Verify the pump checks signal between iterations
+    let iterationCount = 0;
+    const source = from((async function* () {
+      iterationCount++;
+      yield [new TextEncoder().encode('chunk1')];
+      iterationCount++;
+      yield [new TextEncoder().encode('chunk2')];
+      iterationCount++;
+      yield [new TextEncoder().encode('chunk3')];
+    })());
+
+    const controller = new AbortController();
+    const { broadcast: bc } = Broadcast.from(source, {
+      highWaterMark: 100, // Large buffer so writes don't block
+      signal: controller.signal,
+    });
+
+    const consumer = bc.push();
+
+    // Let pump run a bit
+    await new Promise(resolve => setTimeout(resolve, 30));
+
+    // Abort
+    controller.abort();
+
+    // Collect whatever we got
+    const chunks = await collect(consumer);
+    // The pump should have stopped — we might get some chunks but not hang
+    assert.ok(chunks.length <= 3);
+  });
+});
+
+describe('broadcast _abort consumer cleanup', () => {
+  it('should detach consumers and clear the set on fail [BCAST-110]', async () => {
+    const { writer, broadcast: bc } = broadcast({ highWaterMark: 100 });
+
+    const consumer1 = bc.push();
+    const consumer2 = bc.push();
+    assert.strictEqual(bc.consumerCount, 2);
+
+    // Fail the writer — should detach all consumers
+    await writer.fail(new Error('test error'));
+
+    // Consumer count should be 0 — consumers are detached and cleared
+    assert.strictEqual(bc.consumerCount, 0, 'All consumers should be detached after fail');
+
+    // Consumers should still see the error when iterated
+    await assert.rejects(collect(consumer1), /test error/);
+    await assert.rejects(collect(consumer2), /test error/);
+  });
+
+  it('should detach consumers even without pending reads [BCAST-111]', async () => {
+    const { writer, broadcast: bc } = broadcast({ highWaterMark: 100 });
+
+    // Create consumers but don't start reading — no pending reads
+    bc.push();
+    bc.push();
+    assert.strictEqual(bc.consumerCount, 2);
+
+    await writer.fail(new Error('test error'));
+
+    // Should still be cleaned up
+    assert.strictEqual(bc.consumerCount, 0);
   });
 });

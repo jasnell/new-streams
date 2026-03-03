@@ -604,7 +604,7 @@ eventSource.on('data', async (chunk) => {
 });
 
 eventSource.on('end', () => writer.end());
-eventSource.on('error', (err) => writer.abort(err));
+eventSource.on('error', (err) => writer.fail(err));
 ```
 
 The `ondrain()` function:

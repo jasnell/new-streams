@@ -231,7 +231,7 @@ socket.on('end', () => {
   writer.end();
 });
 socket.on('error', (err) => {
-  writer.abort(err);
+  writer.fail(err);
 });
 
 // Consumer reads from 'readable'
@@ -1003,10 +1003,10 @@ writable.destroy(new Error('Write failed'));
 
 **New Stream API:**
 ```javascript
-await writer.abort(new Error('Write failed'));
+await writer.fail(new Error('Write failed'));
 
 // Or sync
-writer.abortSync(new Error('Write failed'));
+writer.failSync(new Error('Write failed'));
 ```
 
 ### Transform Errors

@@ -5,6 +5,11 @@
 This is a **prototype** of an alternative streams API and implementation designed to address
 fundamental ergonomics and performance flaws in the Web Streams API model.
 
+This is a **work in progress** and should not be considered a final design.
+The API and implementation are evolving as we explore design tradeoffs and gather feedback.
+
+**DO NOT USE THIS API IN PRODUCTION** — it is not stable and may change significantly.
+
 ## Why
 
 The WHATWG Streams Standard[^1] ("Web streams") provides a foundation for streaming data on the web

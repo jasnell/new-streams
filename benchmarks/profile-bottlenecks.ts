@@ -177,7 +177,7 @@ async function main() {
     await Stream.pipeTo(Stream.from(chunks), {
       write(chunk) { total += chunk.length; },
       end() {},
-      abort() {},
+      fail() {},
     });
   });
   
@@ -186,7 +186,7 @@ async function main() {
     Stream.pipeToSync(Stream.fromSync(chunks), {
       write(chunk) { total += chunk.length; },
       end() {},
-      abort() {},
+      fail() {},
     });
   });
   

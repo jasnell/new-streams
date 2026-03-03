@@ -35,11 +35,11 @@ function decode(bytes: Uint8Array): string {
 }
 
 // Create a mock sync writer for testing
-function createMockSyncWriter(): SyncWriter & { chunks: Uint8Array[]; closed: boolean; aborted: Error | undefined } {
+function createMockSyncWriter(): SyncWriter & { chunks: Uint8Array[]; closed: boolean; failed: Error | undefined } {
   const writer = {
     chunks: [] as Uint8Array[],
     closed: false,
-    aborted: undefined as Error | undefined,
+    failed: undefined as Error | undefined,
     get desiredSize() {
       return this.closed ? null : 10;
     },
@@ -57,8 +57,8 @@ function createMockSyncWriter(): SyncWriter & { chunks: Uint8Array[]; closed: bo
       this.closed = true;
       return this.chunks.reduce((acc, c) => acc + c.byteLength, 0);
     },
-    abort(reason?: Error) {
-      this.aborted = reason;
+    fail(reason?: Error) {
+      this.failed = reason;
       this.closed = true;
     },
   };
@@ -66,11 +66,11 @@ function createMockSyncWriter(): SyncWriter & { chunks: Uint8Array[]; closed: bo
 }
 
 // Create a mock async writer for testing
-function createMockWriter(): Writer & { chunks: Uint8Array[]; closed: boolean; aborted: Error | undefined } {
+function createMockWriter(): Writer & { chunks: Uint8Array[]; closed: boolean; failed: Error | undefined } {
   const writer = {
     chunks: [] as Uint8Array[],
     closed: false,
-    aborted: undefined as Error | undefined,
+    failed: undefined as Error | undefined,
     get desiredSize() {
       return this.closed ? null : 10;
     },
@@ -104,12 +104,12 @@ function createMockWriter(): Writer & { chunks: Uint8Array[]; closed: boolean; a
       this.closed = true;
       return this.chunks.reduce((acc, c) => acc + c.byteLength, 0);
     },
-    async abort(reason?: Error) {
-      this.aborted = reason;
+    async fail(reason?: Error) {
+      this.failed = reason;
       this.closed = true;
     },
-    abortSync(reason?: Error) {
-      this.aborted = reason;
+    failSync(reason?: Error) {
+      this.failed = reason;
       this.closed = true;
       return true;
     },
@@ -359,18 +359,18 @@ describe('pull()', () => {
   });
 
   describe('error handling', () => {
-    it('should call abort on transforms when error occurs [PULL-032]', async () => {
-      let abortCalled = false;
+    it('should fire signal on transforms when error occurs [PULL-032]', async () => {
+      let signalAborted = false;
       const source = from('test');
       // Object = stateful transform (receives entire source as async iterable)
       const transform1: Transform = {
-        async *transform(source) {
+        async *transform(source, { signal }) {
+          signal.addEventListener('abort', () => {
+            signalAborted = true;
+          }, { once: true });
           for await (const chunks of source) {
             if (chunks) yield chunks;
           }
-        },
-        abort: () => {
-          abortCalled = true;
         },
       };
       const transform2: Transform = () => {
@@ -383,7 +383,247 @@ describe('pull()', () => {
         await collectBytes(output);
       }, /Transform error/);
 
-      assert.strictEqual(abortCalled, true);
+      assert.strictEqual(signalAborted, true);
+    });
+  });
+
+  describe('transform signal', () => {
+    it('should pass signal to stateless transforms', async () => {
+      let receivedSignal: AbortSignal | undefined;
+      const source = from('hello');
+      const transform: Transform = (chunks, { signal }) => {
+        receivedSignal = signal;
+        return chunks;
+      };
+
+      const output = pull(source, transform);
+      await collectBytes(output);
+
+      assert.ok(receivedSignal, 'Transform should receive a signal');
+      assert.ok(receivedSignal instanceof AbortSignal, 'Should be an AbortSignal');
+    });
+
+    it('should pass signal to stateful transforms', async () => {
+      let receivedSignal: AbortSignal | undefined;
+      const source = from('hello');
+      const transform: Transform = {
+        async *transform(source, { signal }) {
+          receivedSignal = signal;
+          for await (const chunks of source) {
+            if (chunks) yield chunks;
+          }
+        },
+      };
+
+      const output = pull(source, transform);
+      await collectBytes(output);
+
+      assert.ok(receivedSignal, 'Transform should receive a signal');
+      assert.ok(receivedSignal instanceof AbortSignal, 'Should be an AbortSignal');
+    });
+
+    it('should fire signal when user signal aborts', async () => {
+      let transformSignalAborted = false;
+      const controller = new AbortController();
+      const source = from((async function* () {
+        yield [new TextEncoder().encode('chunk1')];
+        await new Promise(resolve => setTimeout(resolve, 50));
+        yield [new TextEncoder().encode('chunk2')];
+      })());
+
+      const transform: Transform = (chunks, { signal }) => {
+        signal.addEventListener('abort', () => {
+          transformSignalAborted = true;
+        }, { once: true });
+        return chunks;
+      };
+
+      const output = pull(source, transform, { signal: controller.signal });
+
+      // Abort after first chunk
+      setTimeout(() => controller.abort(), 20);
+
+      await assert.rejects(async () => {
+        await collectBytes(output);
+      }, /Abort/);
+
+      assert.strictEqual(transformSignalAborted, true);
+    });
+
+    it('should fire signal when consumer breaks', async () => {
+      let transformSignalAborted = false;
+      const source = from((async function* () {
+        yield [new TextEncoder().encode('chunk1')];
+        yield [new TextEncoder().encode('chunk2')];
+        yield [new TextEncoder().encode('chunk3')];
+      })());
+
+      const transform: Transform = (chunks, { signal }) => {
+        if (!transformSignalAborted) {
+          signal.addEventListener('abort', () => {
+            transformSignalAborted = true;
+          }, { once: true });
+        }
+        return chunks;
+      };
+
+      const output = pull(source, transform);
+      // Only consume one batch, then break
+      for await (const _batch of output) {
+        break;
+      }
+
+      assert.strictEqual(transformSignalAborted, true);
+    });
+
+    it('should fire signal when source throws', async () => {
+      let transformSignalAborted = false;
+      const source = from((async function* () {
+        yield [new TextEncoder().encode('chunk1')];
+        throw new Error('Source error');
+      })());
+
+      const transform: Transform = (chunks, { signal }) => {
+        if (!transformSignalAborted) {
+          signal.addEventListener('abort', () => {
+            transformSignalAborted = true;
+          }, { once: true });
+        }
+        return chunks;
+      };
+
+      const output = pull(source, transform);
+
+      await assert.rejects(async () => {
+        await collectBytes(output);
+      }, /Source error/);
+
+      assert.strictEqual(transformSignalAborted, true);
+    });
+
+    it('should fire signal when a transform throws', async () => {
+      let transform1SignalAborted = false;
+      const source = from('test');
+
+      const transform1: Transform = {
+        async *transform(source, { signal }) {
+          signal.addEventListener('abort', () => {
+            transform1SignalAborted = true;
+          }, { once: true });
+          for await (const chunks of source) {
+            if (chunks) yield chunks;
+          }
+        },
+      };
+
+      const transform2: Transform = () => {
+        throw new Error('Transform 2 error');
+      };
+
+      const output = pull(source, transform1, transform2);
+
+      await assert.rejects(async () => {
+        await collectBytes(output);
+      }, /Transform 2 error/);
+
+      assert.strictEqual(transform1SignalAborted, true);
+    });
+
+    it('should NOT fire signal on normal completion', async () => {
+      let signalAborted = false;
+      const source = from('hello');
+      const transform: Transform = (chunks, { signal }) => {
+        signal.addEventListener('abort', () => {
+          signalAborted = true;
+        }, { once: true });
+        return chunks;
+      };
+
+      const output = pull(source, transform);
+      await collectBytes(output);
+
+      assert.strictEqual(signalAborted, false);
+    });
+
+    it('should allow transform to pass signal to sub-operation', async () => {
+      let subOperationAborted = false;
+      const controller = new AbortController();
+
+      const source = from((async function* () {
+        yield [new TextEncoder().encode('chunk1')];
+        await new Promise(resolve => setTimeout(resolve, 50));
+        yield [new TextEncoder().encode('chunk2')];
+      })());
+
+      const transform: Transform = async (chunks, { signal }) => {
+        if (chunks === null) return null;
+        // Simulate passing signal to a sub-operation
+        await new Promise<void>((resolve, reject) => {
+          if (signal.aborted) {
+            subOperationAborted = true;
+            reject(signal.reason);
+            return;
+          }
+          signal.addEventListener('abort', () => {
+            subOperationAborted = true;
+            reject(signal.reason);
+          }, { once: true });
+          // Resolve after a short delay (simulating work)
+          setTimeout(resolve, 5);
+        });
+        return chunks;
+      };
+
+      const output = pull(source, transform, { signal: controller.signal });
+      setTimeout(() => controller.abort(), 20);
+
+      await assert.rejects(async () => {
+        await collectBytes(output);
+      }, /Abort/);
+
+      assert.strictEqual(subOperationAborted, true);
+    });
+
+    it('should throw immediately with pre-aborted signal without calling transforms', async () => {
+      let transformCalled = false;
+      const controller = new AbortController();
+      controller.abort();
+
+      const source = from('test');
+      const transform: Transform = (chunks) => {
+        transformCalled = true;
+        return chunks;
+      };
+
+      const output = pull(source, transform, { signal: controller.signal });
+
+      await assert.rejects(async () => {
+        await collectBytes(output);
+      }, /Abort/);
+
+      assert.strictEqual(transformCalled, false);
+    });
+
+    it('should give each transform its own options object', async () => {
+      const options1: object[] = [];
+      const options2: object[] = [];
+      const source = from('hello');
+
+      const t1: Transform = (chunks, opts) => {
+        options1.push(opts);
+        return chunks;
+      };
+      const t2: Transform = (chunks, opts) => {
+        options2.push(opts);
+        return chunks;
+      };
+
+      const output = pull(source, t1, t2);
+      await collectBytes(output);
+
+      assert.ok(options1.length > 0, 'Transform 1 should have been called');
+      assert.ok(options2.length > 0, 'Transform 2 should have been called');
+      assert.notStrictEqual(options1[0], options2[0], 'Each transform should get its own options object');
     });
   });
 });
@@ -423,7 +663,7 @@ describe('pipeToSync()', () => {
       assert.strictEqual(writer.closed, false);
     });
 
-    it('should respect preventAbort option [WRITE-011]', () => {
+    it('should respect preventFail option [WRITE-011]', () => {
       const source = {
         *[Symbol.iterator]() {
           yield [new TextEncoder().encode('test')];
@@ -433,15 +673,15 @@ describe('pipeToSync()', () => {
       const writer = createMockSyncWriter();
 
       assert.throws(() => {
-        pipeToSync(source, writer, { preventAbort: true });
+        pipeToSync(source, writer, { preventFail: true });
       }, /Source error/);
 
-      assert.strictEqual(writer.aborted, undefined);
+      assert.strictEqual(writer.failed, undefined);
     });
   });
 
   describe('error handling', () => {
-    it('should abort writer on source error [WRITE-020]', () => {
+    it('should fail writer on source error [WRITE-020]', () => {
       const source = {
         *[Symbol.iterator]() {
           yield [new TextEncoder().encode('test')];
@@ -454,7 +694,7 @@ describe('pipeToSync()', () => {
         pipeToSync(source, writer);
       }, /Source error/);
 
-      assert.ok(writer.aborted);
+      assert.ok(writer.failed);
     });
 
     it('should throw if no writer provided [WRITE-021]', () => {
@@ -508,7 +748,7 @@ describe('pipeTo()', () => {
       assert.strictEqual(writer.closed, false);
     });
 
-    it('should respect preventAbort option [WRITE-011]', async () => {
+    it('should respect preventFail option [WRITE-011]', async () => {
       const source = from(
         (async function* () {
           yield [new TextEncoder().encode('test')];
@@ -518,10 +758,10 @@ describe('pipeTo()', () => {
       const writer = createMockWriter();
 
       await assert.rejects(async () => {
-        await pipeTo(source, writer, { preventAbort: true });
+        await pipeTo(source, writer, { preventFail: true });
       }, /Source error/);
 
-      assert.strictEqual(writer.aborted, undefined);
+      assert.strictEqual(writer.failed, undefined);
     });
 
     it('should respect AbortSignal [WRITE-012]', async () => {
@@ -545,7 +785,7 @@ describe('pipeTo()', () => {
   });
 
   describe('error handling', () => {
-    it('should abort writer on source error [WRITE-020]', async () => {
+    it('should fail writer on source error [WRITE-020]', async () => {
       const source = from(
         (async function* () {
           yield [new TextEncoder().encode('test')];
@@ -558,7 +798,7 @@ describe('pipeTo()', () => {
         await pipeTo(source, writer);
       }, /Source error/);
 
-      assert.ok(writer.aborted);
+      assert.ok(writer.failed);
     });
 
     it('should throw if no writer provided [WRITE-021]', async () => {
@@ -566,6 +806,111 @@ describe('pipeTo()', () => {
       await assert.rejects(async () => {
         await pipeTo(source);
       }, /pipeTo requires a writer argument/);
+    });
+  });
+
+  describe('signal propagation to writes', () => {
+    it('should pass signal to writer.write() and cancel blocked write [WRITE-025]', async () => {
+      // Create a writer that blocks on write until signal fires
+      let writeSignalReceived = false;
+      const writerChunks: Uint8Array[] = [];
+      const slowWriter: Writer = {
+        get desiredSize() { return 10; },
+        async write(chunk: Uint8Array | string, options?) {
+          const data = typeof chunk === 'string' ? new TextEncoder().encode(chunk) : chunk;
+          if (options?.signal) {
+            // Simulate slow I/O that respects signal
+            await new Promise<void>((resolve, reject) => {
+              if (options.signal!.aborted) {
+                writeSignalReceived = true;
+                reject(options.signal!.reason);
+                return;
+              }
+              const onAbort = () => {
+                writeSignalReceived = true;
+                reject(options.signal!.reason);
+              };
+              options.signal!.addEventListener('abort', onAbort, { once: true });
+              // Simulate slow write that takes 200ms
+              setTimeout(() => {
+                options.signal!.removeEventListener('abort', onAbort);
+                writerChunks.push(data);
+                resolve();
+              }, 200);
+            });
+          } else {
+            writerChunks.push(data);
+          }
+        },
+        async writev(chunks, options?) {
+          for (const c of chunks) await this.write(c, options);
+        },
+        writeSync() { return false; },
+        writevSync() { return false; },
+        async end() { return writerChunks.reduce((a, c) => a + c.byteLength, 0); },
+        endSync() { return -1; },
+        async fail() {},
+        failSync() { return true; },
+      };
+
+      const controller = new AbortController();
+      const source = from((async function* () {
+        yield [new TextEncoder().encode('chunk1')];
+      })());
+
+      // Abort after a short delay — the write will be in-flight
+      setTimeout(() => controller.abort(), 30);
+
+      await assert.rejects(async () => {
+        await pipeTo(source, slowWriter, { signal: controller.signal });
+      }, /Abort/);
+
+      assert.strictEqual(writeSignalReceived, true);
+    });
+
+    it('should pass signal to writer.end() [WRITE-026]', async () => {
+      let endSignalReceived = false;
+      const writer: Writer = {
+        get desiredSize() { return 10; },
+        async write(chunk: Uint8Array | string) {},
+        async writev(chunks: (Uint8Array | string)[]) {},
+        writeSync() { return true; },
+        writevSync() { return true; },
+        async end(options?) {
+          endSignalReceived = options?.signal !== undefined;
+          return 0;
+        },
+        endSync() { return 0; },
+        async fail() {},
+        failSync() { return true; },
+      };
+
+      const source = from('test');
+      await pipeTo(source, writer, { signal: new AbortController().signal });
+
+      assert.strictEqual(endSignalReceived, true);
+    });
+
+    it('should not pass signal to writes when no user signal provided', async () => {
+      let writeOptionsReceived: unknown = 'not-called';
+      const writer: Writer = {
+        get desiredSize() { return 10; },
+        async write(chunk: Uint8Array | string, options?) {
+          writeOptionsReceived = options;
+        },
+        async writev(chunks: (Uint8Array | string)[]) {},
+        writeSync() { return true; },
+        writevSync() { return true; },
+        async end() { return 0; },
+        endSync() { return 0; },
+        async fail() {},
+        failSync() { return true; },
+      };
+
+      const source = from('test');
+      await pipeTo(source, writer);
+
+      assert.strictEqual(writeOptionsReceived, undefined);
     });
   });
 
@@ -604,8 +949,8 @@ describe('pipeTo()', () => {
           return writerChunks.reduce((acc, c) => acc + c.byteLength, 0);
         },
         endSync() { return 0; },
-        async abort() {},
-        abortSync() { return true; },
+        async fail() {},
+        failSync() { return true; },
       };
 
       await pipeTo(source, hashingWriter);

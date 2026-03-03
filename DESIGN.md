@@ -105,19 +105,29 @@ type PrimitiveChunk = string | ArrayBuffer | ArrayBufferView;
 ### Transform Types
 
 ```typescript
+// Options passed to transform functions by the pipeline
+interface TransformOptions {
+  /** Signal that fires when the pipeline is cancelled, errors, or
+   *  the consumer stops iteration. */
+  readonly signal: AbortSignal;
+}
+
 // Stateless transform - function called for each batch
-type TransformFn = (chunks: Uint8Array[] | null) => AsyncTransformResult;
+type TransformFn = (
+  chunks: Uint8Array[] | null,
+  options: TransformOptions
+) => AsyncTransformResult;
 
 // Stateful transform - generator wrapping entire source
 type StatefulTransformFn = (
-  source: AsyncIterable<Uint8Array[] | null>
+  source: AsyncIterable<Uint8Array[] | null>,
+  options: TransformOptions
 ) => AsyncIterable<TransformYield>;
 
-// Transform object for stateful transforms with optional abort handler
+// Transform object for stateful transforms
 // Using an object (vs a plain function) indicates this is a stateful transform
 interface TransformObject {
   transform: StatefulTransformFn;
-  abort?: (reason?: Error) => void | Promise<void>;
 }
 
 // Function = stateless, Object = stateful
@@ -127,17 +137,21 @@ type Transform = TransformFn | TransformObject;
 ### Writer Interface
 
 ```typescript
+interface WriteOptions {
+  readonly signal?: AbortSignal;
+}
+
 interface Writer {
   readonly desiredSize: number | null;  // >= 0 or null (closed)
 
-  write(chunk: Uint8Array | string): Promise<void>;
-  writev(chunks: (Uint8Array | string)[]): Promise<void>;
+  write(chunk: Uint8Array | string, options?: WriteOptions): Promise<void>;
+  writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void>;
   writeSync(chunk: Uint8Array | string): boolean;
   writevSync(chunks: (Uint8Array | string)[]): boolean;
-  end(): Promise<number>;
+  end(options?: WriteOptions): Promise<number>;
   endSync(): number;
-  abort(reason?: Error): Promise<void>;
-  abortSync(reason?: Error): boolean;
+  fail(reason?: Error): Promise<void>;
+  failSync(reason?: Error): boolean;
 }
 ```
 
@@ -259,7 +273,7 @@ interface PullOptions {
 **Behavior:**
 - Transforms execute lazily when consumer pulls
 - Sync sources work directly - no async wrapping overhead
-- Error in transform N calls `abort()` on transforms 0..(N-1)
+- Error in transform N aborts the pipeline signal, notifying all transforms
 
 ### Stream.pullSync()
 
@@ -300,7 +314,7 @@ function pipeTo(
 interface PipeToOptions {
   signal?: AbortSignal;
   preventClose?: boolean;   // Don't call writer.end() on completion
-  preventAbort?: boolean;   // Don't call writer.abort() on error
+  preventFail?: boolean;    // Don't call writer.fail() on error
 }
 ```
 
@@ -585,26 +599,30 @@ typedef (Uint8Array or USVString) WritableChunk;
 ### Writer Interface
 
 ```webidl
+dictionary WriteOptions {
+  AbortSignal signal;
+};
+
 [Exposed=*]
 interface Writer {
-  // Backpressure indicator: >= 0 (slots available), null (closed/aborted)
+  // Backpressure indicator: >= 0 (slots available), null (closed/failed)
   readonly attribute long? desiredSize;
 
   // Async write operations
-  Promise<undefined> write(WritableChunk chunk);
-  Promise<undefined> writev(sequence<WritableChunk> chunks);
+  Promise<undefined> write(WritableChunk chunk, optional WriteOptions options = {});
+  Promise<undefined> writev(sequence<WritableChunk> chunks, optional WriteOptions options = {});
 
   // Sync write attempts - return true if successful, false if buffer full
   boolean writeSync(WritableChunk chunk);
   boolean writevSync(sequence<WritableChunk> chunks);
 
   // End stream - returns total bytes written
-  Promise<unsigned long long> end();
+  Promise<unsigned long long> end(optional WriteOptions options = {});
   long long endSync();  // Returns -1 if cannot complete synchronously
 
-  // Abort stream
-  Promise<undefined> abort(optional any reason);
-  boolean abortSync(optional any reason);
+  // Fail stream (put writer into error state)
+  Promise<undefined> fail(optional any reason);
+  boolean failSync(optional any reason);
 };
 
 [Exposed=*]
@@ -614,7 +632,7 @@ interface SyncWriter {
   undefined write(WritableChunk chunk);
   undefined writev(sequence<WritableChunk> chunks);
   unsigned long long end();
-  undefined abort(optional any reason);
+  undefined fail(optional any reason);
 };
 ```
 
@@ -649,19 +667,21 @@ interface SyncReadableByteStream {
 ### Transform Types
 
 ```webidl
+// Options passed to transform functions by the pipeline
+dictionary TransformOptions {
+  required AbortSignal signal;
+};
+
 // Transform function signature (TypeScript-style for clarity)
-// transform: (chunks: Uint8Array[] | null) => TransformResult
-callback TransformFunction = any (ChunkBatch? chunks);
-callback StatefulTransformFunction = any (AsyncIterable source);
+// transform: (chunks: Uint8Array[] | null, options: TransformOptions) => TransformResult
+callback TransformFunction = any (ChunkBatch? chunks, TransformOptions options);
+callback StatefulTransformFunction = any (AsyncIterable source, TransformOptions options);
 
 // TransformObject is always stateful (receives entire source as async iterable)
 // Using an object vs a plain function indicates stateful transform
 dictionary TransformObject {
   required StatefulTransformFunction transform;
-  AbortCallback abort;
 };
-
-callback AbortCallback = undefined (optional any reason);
 
 // Function = stateless (called per batch), Object = stateful (receives entire source)
 typedef (TransformFunction or TransformObject) Transform;
@@ -678,12 +698,12 @@ dictionary PullOptions {
 dictionary WriteToOptions {
   AbortSignal signal;
   boolean preventClose = false;
-  boolean preventAbort = false;
+  boolean preventFail = false;
 };
 
 dictionary WriteToSyncOptions {
   boolean preventClose = false;
-  boolean preventAbort = false;
+  boolean preventFail = false;
 };
 
 dictionary ConsumeOptions {
@@ -878,7 +898,7 @@ namespace SyncShare {
 
 4. **Chunk Batching**: All iterables yield `sequence<Uint8Array>` (ChunkBatch) rather than individual chunks. This is a deliberate design choice to amortize async iteration overhead.
 
-5. **Non-Negative desiredSize**: Unlike Web Streams where `desiredSize` can be negative, this API guarantees `desiredSize >= 0` or `null` (closed/aborted).
+5. **Non-Negative desiredSize**: Unlike Web Streams where `desiredSize` can be negative, this API guarantees `desiredSize >= 0` or `null` (closed/failed).
 
 ---
 

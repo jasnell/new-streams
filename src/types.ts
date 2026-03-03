@@ -151,6 +151,15 @@ export type Streamable = SyncStreamable | AsyncStreamable;
 // =============================================================================
 
 /**
+ * Options for individual write operations.
+ * Contains a signal to cancel the specific operation without affecting the writer.
+ */
+export interface WriteOptions {
+  /** Signal to cancel this write operation. */
+  readonly signal?: AbortSignal;
+}
+
+/**
  * Async writer interface with backpressure.
  * 
  * Writers use chunk-oriented backpressure by default: desiredSize counts pending
@@ -162,15 +171,15 @@ export interface Writer {
    * Slots available before hitting highWaterMark.
    * - Always >= 0 (never negative, unlike Web Streams)
    * - 0 means buffer is full
-   * - null if writer is closed/aborted
+   * - null if writer is closed/failed
    */
   readonly desiredSize: number | null;
 
   /** Write single chunk. Rejects if buffer full (strict policy). */
-  write(chunk: Uint8Array | string): Promise<void>;
+  write(chunk: Uint8Array | string, options?: WriteOptions): Promise<void>;
 
   /** Write multiple chunks atomically. Counts as 1 slot for backpressure. */
-  writev(chunks: (Uint8Array | string)[]): Promise<void>;
+  writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void>;
 
   /** Try to write synchronously. Returns true if successful, false if buffer full. */
   writeSync(chunk: Uint8Array | string): boolean;
@@ -179,16 +188,16 @@ export interface Writer {
   writevSync(chunks: (Uint8Array | string)[]): boolean;
 
   /** Signal end of stream. Returns total bytes written. */
-  end(): Promise<number>;
+  end(options?: WriteOptions): Promise<number>;
 
   /** Signal end synchronously. Returns total bytes written, or -1 if cannot complete sync. */
   endSync(): number;
 
-  /** Signal error/abort. Downstream sees error. */
-  abort(reason?: Error): Promise<void>;
+  /** Put writer into terminal error state. Downstream sees error. */
+  fail(reason?: Error): Promise<void>;
 
-  /** Signal error/abort synchronously. Returns false if sync abort not possible. */
-  abortSync(reason?: Error): boolean;
+  /** Put writer into terminal error state synchronously. Returns false if sync fail not possible. */
+  failSync(reason?: Error): boolean;
 }
 
 /**
@@ -201,7 +210,7 @@ export interface SyncWriter {
    * Slots available before hitting limit.
    * - Always >= 0 (never negative)
    * - 0 means buffer is full, writes will throw
-   * - null if writer is closed/aborted
+   * - null if writer is closed/failed
    */
   readonly desiredSize: number | null;
 
@@ -214,8 +223,8 @@ export interface SyncWriter {
   /** Signal end of stream. Returns total bytes written. */
   end(): number;
 
-  /** Signal error/abort. */
-  abort(reason?: Error): void;
+  /** Put writer into terminal error state. */
+  fail(reason?: Error): void;
 }
 
 // =============================================================================
@@ -392,29 +401,41 @@ export type AsyncTransformResult =
   | AsyncGenerator<TransformYield, void, unknown>;
 
 /**
- * Stateless transform - function called for each batch.
- * Receives chunks or null (flush signal).
+ * Options passed to transform functions by the pipeline.
+ * Contains the pipeline's cancellation signal.
  */
-export type TransformFn = (chunks: Uint8Array[] | null) => AsyncTransformResult;
+export interface TransformOptions {
+  /** Signal that fires when the pipeline is cancelled, errors, or the
+   *  consumer stops iteration. */
+  readonly signal: AbortSignal;
+}
+
+/**
+ * Stateless transform - function called for each batch.
+ * Receives chunks or null (flush signal), and pipeline options.
+ */
+export type TransformFn = (
+  chunks: Uint8Array[] | null,
+  options: TransformOptions
+) => AsyncTransformResult;
 
 /**
  * Stateful transform - generator that receives chunks and yields output.
  * Useful for compression, encryption, parsing, etc. that need state across chunks.
  */
 export type StatefulTransformFn = (
-  source: AsyncIterable<Uint8Array[] | null>
+  source: AsyncIterable<Uint8Array[] | null>,
+  options: TransformOptions
 ) => AsyncIterable<TransformYield> | AsyncGenerator<TransformYield, void, unknown>;
 
 /**
- * Transform object for stateful transforms with optional abort handler.
+ * Transform object for stateful transforms.
  * Using an object (vs a plain function) indicates this is a stateful transform
  * that receives the entire source as an async iterable.
  */
 export interface TransformObject {
   /** Stateful transform function that receives the entire source. */
   transform: StatefulTransformFn;
-  /** Called when transform is aborted due to downstream error. */
-  abort?: (reason?: Error) => void | Promise<void>;
 }
 
 /**
@@ -451,15 +472,13 @@ export type StatefulSyncTransformFn = (
 ) => Iterable<TransformYield> | Generator<TransformYield, void, unknown>;
 
 /**
- * Sync transform object for stateful transforms with optional abort handler.
+ * Sync transform object for stateful transforms.
  * Using an object (vs a plain function) indicates this is a stateful transform
  * that receives the entire source as an iterable.
  */
 export interface SyncTransformObject {
   /** Stateful transform function that receives the entire source. */
   transform: StatefulSyncTransformFn;
-  /** Called when transform is aborted due to downstream error. */
-  abort?: (reason?: Error) => void;
 }
 
 /**
@@ -492,8 +511,8 @@ export interface PipeToOptions {
   /** If true, don't call writer.end() when source completes. */
   preventClose?: boolean;
 
-  /** If true, don't call writer.abort() when source errors. */
-  preventAbort?: boolean;
+  /** If true, don't call writer.fail() when source errors. */
+  preventFail?: boolean;
 }
 
 /**
@@ -503,8 +522,8 @@ export interface PipeToSyncOptions {
   /** If true, don't call writer.end() when source completes. */
   preventClose?: boolean;
 
-  /** If true, don't call writer.abort() when source errors. */
-  preventAbort?: boolean;
+  /** If true, don't call writer.fail() when source errors. */
+  preventFail?: boolean;
 }
 
 /**
@@ -736,7 +755,7 @@ export interface SyncShareable {
  * - `true` if backpressure is cleared and writes may be accepted
  * - `false` if the writer closed while waiting (no more writes accepted)
  * 
- * The Promise rejects if the writer aborts/errors while waiting.
+ * The Promise rejects if the writer fails/errors while waiting.
  * 
  * Returns `null` if drain is not applicable (e.g., desiredSize is already null).
  * 

@@ -215,25 +215,34 @@ async function main() {
   }
 
   // ============================================================================
-  // Transform with abort handler
+  // Transform with signal-based cancellation
   // ============================================================================
-  section('Transform with abort handler');
+  section('Transform with signal-based cancellation');
 
   {
-    let abortCalled = false;
+    let signalAborted = false;
 
-    const withAbort: TransformObject = {
-      transform: (chunks) => chunks,
-      abort: (reason) => {
-        abortCalled = true;
-        console.log('Transform aborted:', reason?.message || 'no reason');
-      }
+    const withSignal: TransformObject = {
+      async *transform(source, { signal }) {
+        const onAbort = () => {
+          signalAborted = true;
+          console.log('Transform signal aborted:', (signal.reason as Error)?.message || 'no reason');
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        try {
+          for await (const chunks of source) {
+            if (chunks) yield chunks;
+          }
+        } finally {
+          signal.removeEventListener('abort', onAbort);
+        }
+      },
     };
 
     const controller = new AbortController();
     const output = Stream.pull(
       Stream.from(['chunk1', 'chunk2', 'chunk3']),
-      withAbort,
+      withSignal,
       { signal: controller.signal }
     );
 
@@ -249,7 +258,7 @@ async function main() {
       console.log('Iteration aborted');
     }
 
-    console.log('Abort handler called:', abortCalled);
+    console.log('Signal aborted:', signalAborted);
   }
 
   // ============================================================================

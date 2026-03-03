@@ -7,6 +7,7 @@
 
 import type {
   Writer,
+  WriteOptions,
   ByteStreamReadable,
   BackpressurePolicy,
   PushStreamOptions,
@@ -105,12 +106,12 @@ class PushQueue {
 
     if (this.signal) {
       if (this.signal.aborted) {
-        this.abort(this.signal.reason instanceof Error
+        this.fail(this.signal.reason instanceof Error
           ? this.signal.reason
           : new DOMException('Aborted', 'AbortError'));
       } else {
         this.abortHandler = () => {
-          this.abort(this.signal!.reason instanceof Error
+          this.fail(this.signal!.reason instanceof Error
             ? this.signal!.reason
             : new DOMException('Aborted', 'AbortError'));
         };
@@ -210,8 +211,18 @@ class PushQueue {
    * - 'strict': Queues if buffer full but rejects if too many pending writes (>= highWaterMark)
    * - 'block': Waits for buffer space (unbounded pending writes)
    * - 'drop-*': Always succeeds (handled by writeSync)
+   *
+   * If signal is provided, a write blocked on backpressure will reject immediately
+   * when the signal fires. The cancelled write is removed from pendingWrites so it
+   * does not occupy a slot. The queue itself is NOT put into an error state — this
+   * is per-operation cancellation, not terminal failure.
    */
-  async writeAsync(chunks: Uint8Array[]): Promise<void> {
+  async writeAsync(chunks: Uint8Array[], signal?: AbortSignal): Promise<void> {
+    // Check for pre-aborted signal
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+    }
+
     // Check if write is possible
     if (this.writerState !== 'open') {
       throw new Error('Writer is closed');
@@ -239,20 +250,51 @@ class PushQueue {
           );
         }
         // Otherwise, queue this write and wait for space
-        return new Promise((resolve, reject) => {
-          this.pendingWrites.push({ chunks, resolve, reject });
-        });
+        return this.createPendingWrite(chunks, signal);
 
       case 'block':
         // Wait for space (unbounded pending writes)
-        return new Promise((resolve, reject) => {
-          this.pendingWrites.push({ chunks, resolve, reject });
-        });
+        return this.createPendingWrite(chunks, signal);
 
       default:
         // This shouldn't happen - writeSync handles drop-* policies
         throw new Error('Unexpected: writeSync should have handled non-strict policy');
     }
+  }
+
+  /**
+   * Create a pending write promise, optionally racing against a signal.
+   * If the signal fires, the entry is removed from pendingWrites and the
+   * promise rejects. Signal listeners are cleaned up on normal resolution.
+   */
+  private createPendingWrite(chunks: Uint8Array[], signal?: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const entry: PendingWrite = { chunks, resolve, reject };
+      this.pendingWrites.push(entry);
+
+      if (!signal) return;
+
+      const onAbort = () => {
+        // Remove from queue so it doesn't occupy a slot
+        const idx = this.pendingWrites.indexOf(entry);
+        if (idx !== -1) this.pendingWrites.splice(idx, 1);
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      };
+
+      // Wrap resolve/reject to clean up signal listener
+      const origResolve = entry.resolve;
+      const origReject = entry.reject;
+      entry.resolve = () => {
+        signal.removeEventListener('abort', onAbort);
+        origResolve();
+      };
+      entry.reject = (reason: Error) => {
+        signal.removeEventListener('abort', onAbort);
+        origReject(reason);
+      };
+
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   /**
@@ -274,15 +316,15 @@ class PushQueue {
   }
 
   /**
-   * Signal error/abort.
+   * Put queue into terminal error state.
    */
-  abort(reason?: Error): void {
+  fail(reason?: Error): void {
     if (this.writerState === 'errored') {
       return;
     }
 
     this.writerState = 'errored';
-    this.error = reason ?? new Error('Aborted');
+    this.error = reason ?? new Error('Failed');
     this.cleanup();
     this.rejectPendingReads(this.error);
     this.rejectPendingWrites(this.error);
@@ -302,7 +344,7 @@ class PushQueue {
    * Returns a Promise that:
    * - Resolves with `true` when buffer has space
    * - Resolves with `false` if writer closes while waiting
-   * - Rejects if writer aborts while waiting
+   * - Rejects if writer fails while waiting
    */
   waitForDrain(): Promise<boolean> {
     return new Promise((resolve, reject) => {
@@ -352,6 +394,8 @@ class PushQueue {
     this.consumerState = 'returned';
     this.cleanup();
     this.rejectPendingWrites(new Error('Stream closed by consumer'));
+    // Resolve pending drains with false — no more data will be consumed
+    this.resolvePendingDrains(false);
   }
 
   /**
@@ -366,6 +410,8 @@ class PushQueue {
     this.error = error;
     this.cleanup();
     this.rejectPendingWrites(error);
+    // Reject pending drains — the consumer errored
+    this.rejectPendingDrains(error);
   }
 
   // ===========================================================================
@@ -505,7 +551,7 @@ class PushWriter implements Writer, Drainable {
    * @returns Promise<true> immediately if desiredSize > 0
    * @returns Promise<true> when backpressure clears
    * @returns Promise<false> if writer closes while waiting
-   * @throws if writer aborts while waiting
+   * @throws if writer fails while waiting
    */
   [drainableProtocol](): Promise<boolean> | null {
     const desired = this.desiredSize;
@@ -528,14 +574,14 @@ class PushWriter implements Writer, Drainable {
     return this.queue.desiredSize;
   }
 
-  async write(chunk: Uint8Array | string): Promise<void> {
+  async write(chunk: Uint8Array | string, options?: WriteOptions): Promise<void> {
     const bytes = toUint8Array(chunk);
-    await this.queue.writeAsync([bytes]);
+    await this.queue.writeAsync([bytes], options?.signal);
   }
 
-  async writev(chunks: (Uint8Array | string)[]): Promise<void> {
+  async writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void> {
     const bytes = chunks.map(c => toUint8Array(c));
-    await this.queue.writeAsync(bytes);
+    await this.queue.writeAsync(bytes, options?.signal);
   }
 
   writeSync(chunk: Uint8Array | string): boolean {
@@ -556,7 +602,9 @@ class PushWriter implements Writer, Drainable {
     return this.queue.writeSync(bytes);
   }
 
-  async end(): Promise<number> {
+  async end(options?: WriteOptions): Promise<number> {
+    // end() on PushQueue is synchronous (sets state, resolves pending reads).
+    // Signal accepted for interface compliance but there is nothing to cancel.
     return this.queue.end();
   }
 
@@ -564,12 +612,12 @@ class PushWriter implements Writer, Drainable {
     return this.queue.end();
   }
 
-  async abort(reason?: Error): Promise<void> {
-    this.queue.abort(reason);
+  async fail(reason?: Error): Promise<void> {
+    this.queue.fail(reason);
   }
 
-  abortSync(reason?: Error): boolean {
-    this.queue.abort(reason);
+  failSync(reason?: Error): boolean {
+    this.queue.fail(reason);
     return true;
   }
 }

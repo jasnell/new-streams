@@ -176,19 +176,23 @@ async as it is waiting for data to be written via the writer.
 ### Writer Interface
 
 ```typescript
+interface WriteOptions {
+  readonly signal?: AbortSignal;
+}
+
 interface Writer {
   readonly desiredSize: number | null;  // Slots available (>= 0 or null)
 
-  write(chunk: Uint8Array | string): Promise<void>;
-  writev(chunks: (Uint8Array | string)[]): Promise<void>;
-  end(): Promise<number>;
-  abort(reason?: Error): Promise<void>;
+  write(chunk: Uint8Array | string, options?: WriteOptions): Promise<void>;
+  writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void>;
+  end(options?: WriteOptions): Promise<number>;
+  fail(reason?: Error): Promise<void>;
 
   // Synchronous variants return true if accepted, false if rejected.
   writeSync(chunk: Uint8Array | string): boolean;
   writevSync(chunks: (Uint8Array | string)[]): boolean;
   endSync(): number;
-  abortSync(reason?: Error): boolean;
+  failSync(reason?: Error): boolean;
 }
 ```
 
@@ -206,12 +210,12 @@ interface Writer {
 - `end()`: Signal end of data. Returns total bytes written. No more writes
   accepted after calling.
 
-- `abort(reason)`: Abort the stream with an error. Notifies consumers of failure.
+- `fail(reason)`: Put the writer into an error state. Notifies consumers of failure.
 
-The `writeSync`/`writevSync`/`abortSync`,`endSync` methods return a boolean
+The `writeSync`/`writevSync`/`failSync`,`endSync` methods return a boolean
 indicating if the action was accepted (`true`) or rejected (`false`). They are
 intended for high-performance scenarios, used in conjunction with
-`write`/`writev`/`end`/`abort` for mixed sync/async:
+`write`/`writev`/`end`/`fail` for mixed sync/async:
 
 ```js
 // Attempt to write synchronously first
@@ -329,7 +333,7 @@ function wrapWebSocket(ws: WebSocket): DuplexChannel {
     writer.writeSync(new Uint8Array(event.data));
   };
   ws.onclose = () => writer.endSync();
-  ws.onerror = (e) => writer.abortSync(new Error('WebSocket error'));
+  ws.onerror = (e) => writer.failSync(new Error('WebSocket error'));
 
   return {
     writer: {
@@ -407,8 +411,10 @@ flows until the consumer iterates. Each iteration pulls data through the
 transform chain on demand. Transforms receive a `null` flush signal after all
 source data has been consumed, allowing them to emit any buffered final output.
 
-When aborted via signal or on error, stateful transforms (objects with an
-`abort` handler) are notified to clean up resources.
+When aborted via signal, on error, or when the consumer stops iterating,
+transforms are notified via the `AbortSignal` in their `TransformOptions`
+parameter. Transforms can use the signal to clean up resources, cancel
+sub-operations, or bail out of long-running work.
 
 ```typescript
 function pull(
@@ -467,19 +473,29 @@ or an object:
   compression, encryption, or any transform needing to buffer across chunks.
 
 ```typescript
-// Stateless transform - receives batch, returns batch
-type TransformFn = (chunks: Uint8Array[] | null) => AsyncTransformResult;
+// Options passed to transform functions by the pipeline
+interface TransformOptions {
+  /** Signal that fires when the pipeline is cancelled, errors, or
+   *  the consumer stops iteration. */
+  readonly signal: AbortSignal;
+}
 
-// Stateful transform - generator wrapping source
+// Stateless transform - receives batch and pipeline options, returns batch
+type TransformFn = (
+  chunks: Uint8Array[] | null,
+  options: TransformOptions
+) => AsyncTransformResult;
+
+// Stateful transform - generator wrapping source, receives pipeline options
 type StatefulTransformFn = (
-  source: AsyncIterable<Uint8Array[] | null>
+  source: AsyncIterable<Uint8Array[] | null>,
+  options: TransformOptions
 ) => AsyncIterable<TransformYield>;
 
-// Transform object for stateful transforms with optional abort handler
+// Transform object for stateful transforms
 // Using an object (vs a plain function) indicates this is a stateful transform
 interface TransformObject {
   transform: StatefulTransformFn;
-  abort?: (reason?: Error) => void | Promise<void>;
 }
 
 // Function = stateless, Object = stateful
@@ -500,7 +516,7 @@ Transforms have flexible return types for convenience:
 **Transform Example:**
 ```typescript
 // Stateless transform (plain function)
-const uppercase: TransformFn = (chunks) => {
+const uppercase: TransformFn = (chunks, { signal }) => {
   if (chunks === null) return null; // Flush signal
   return chunks.map(chunk => {
     const text = new TextDecoder().decode(chunk);
@@ -510,20 +526,22 @@ const uppercase: TransformFn = (chunks) => {
 
 // Stateful transform (object with generator function)
 const compress: TransformObject = {
-  async *transform(source) {
+  async *transform(source, { signal }) {
     const compressor = createCompressor();
-    for await (const chunks of source) {
-      if (chunks === null) {
-        yield compressor.finish();
-      } else {
-        for (const chunk of chunks) {
-          yield compressor.push(chunk);
+    try {
+      for await (const chunks of source) {
+        if (chunks === null) {
+          yield compressor.finish();
+        } else {
+          for (const chunk of chunks) {
+            yield compressor.push(chunk);
+          }
         }
       }
+    } finally {
+      // Clean up compressor resources on error/cancellation
+      compressor.destroy();
     }
-  },
-  abort(reason) {
-    // Clean up compressor resources on error/cancellation
   }
 };
 ```
@@ -539,7 +557,8 @@ Consume source and write to a [writer](#writer-interface) with optional [transfo
 - Applying transforms in order before writing
 - Calling `writer.writev()` when available for batch efficiency
 - Calling `writer.end()` on successful completion (unless `preventClose`)
-- Calling `writer.abort()` on error (unless `preventAbort`)
+- Calling `writer.fail()` on error (unless `preventFail`)
+- Propagating the pipeline's `AbortSignal` to `writer.write()` and `writer.end()`
 - Respecting cancellation via `AbortSignal`
 
 Returns the total number of bytes written to the writer.
@@ -554,7 +573,7 @@ function pipeTo(
 **Options:**
 - `signal?: AbortSignal` - Cancellation signal
 - `preventClose?: boolean` - Don't call writer.end() on completion
-- `preventAbort?: boolean` - Don't call writer.abort() on error
+- `preventFail?: boolean` - Don't call writer.fail() on error
 
 **Example:**
 ```typescript
@@ -707,7 +726,10 @@ function tap(callback: TapCallbackAsync): Transform
 function tapSync(callback: TapCallback): SyncTransform
 
 type TapCallback = (chunks: Uint8Array[] | null) => void;
-type TapCallbackAsync = (chunks: Uint8Array[] | null) => void | Promise<void>;
+type TapCallbackAsync = (
+  chunks: Uint8Array[] | null,
+  options: TransformOptions
+) => void | Promise<void>;
 ```
 
 **Example:**
@@ -784,7 +806,7 @@ function ondrain(drainable: unknown): Promise<boolean> | null
 - `null` - Object doesn't implement the Drainable protocol, or drain is not applicable (e.g., `desiredSize` is `null`)
 - `Promise<true>` - Resolves immediately if ready to write (`desiredSize > 0`), or resolves when backpressure clears
 - `Promise<false>` - Resolves when writer closes while waiting (no more writes accepted)
-- `Promise` rejects - If writer aborts/errors while waiting
+- `Promise` rejects - If writer fails/errors while waiting
 
 **Important:** Due to TOCTOU (time-of-check-time-of-use) races, callers should still
 check `desiredSize` and await writes even after the drain promise resolves with `true`.
@@ -819,7 +841,7 @@ eventSource.on('data', async (chunk) => {
 });
 
 eventSource.on('end', () => writer.end());
-eventSource.on('error', (err) => writer.abort(err));
+eventSource.on('error', (err) => writer.fail(err));
 ```
 
 Note: `await null` returns `null`, which is falsy, so the pattern `const canWrite = await Stream.ondrain(x)`
@@ -958,7 +980,7 @@ const [raw, decompressed, parsed] = await Promise.all([
 ### `Stream.shareSync(source, options?)`
 
 Sync pull-model multi-consumer wrapper.
-
+`
 ```typescript
 function shareSync(
   source: Iterable<Uint8Array[]>,
@@ -1280,7 +1302,7 @@ The method returns:
 - `null` if drain is not applicable (e.g., writer is closed)
 - `Promise<true>` resolving immediately if ready, or when backpressure clears
 - `Promise<false>` if writer closes while waiting
-- Promise rejects if writer aborts while waiting
+- Promise rejects if writer fails while waiting
 
 **Custom implementation example:**
 

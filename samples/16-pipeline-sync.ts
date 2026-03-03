@@ -389,7 +389,7 @@ Charlie,35,Chicago`;
         this.desiredSize = null;
         return byteCount;
       },
-      abort(): void {
+      fail(): void {
         this.desiredSize = null;
       },
     };
