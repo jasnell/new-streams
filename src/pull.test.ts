@@ -217,6 +217,36 @@ describe('pullSync()', () => {
       // Note: Each array element becomes a separate batch, so count = 2
       assert.ok(decode(result).includes('total:'));
     });
+
+    it('should yield separate batches per transform yield, not buffer all output', () => {
+      const source = fromSync(['a', 'b', 'c']);
+      const transform: SyncTransform = {
+        transform: function* (sourceIter) {
+          for (const chunks of sourceIter) {
+            if (chunks === null) {
+              yield 'done';
+            } else {
+              for (const chunk of chunks) {
+                yield chunk;
+              }
+            }
+          }
+        },
+      };
+      const output = pullSync(source, transform);
+      // Count the number of batches yielded
+      const batches: Uint8Array[][] = [];
+      for (const batch of output) {
+        batches.push(batch);
+      }
+      // The transform yields 4 items (a, b, c, done) so we should get 4 batches,
+      // not 1 giant batch containing everything
+      assert.strictEqual(batches.length, 4);
+      assert.strictEqual(decode(batches[0][0]), 'a');
+      assert.strictEqual(decode(batches[1][0]), 'b');
+      assert.strictEqual(decode(batches[2][0]), 'c');
+      assert.strictEqual(decode(batches[3][0]), 'done');
+    });
   });
 
   describe('flush signal', () => {

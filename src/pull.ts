@@ -297,14 +297,14 @@ function* applyStatefulSyncTransform(
   transform: StatefulSyncTransformFn
 ): Generator<Uint8Array[]> {
   const output = transform(source);
-  const batch: Uint8Array[] = [];
   for (const item of output) {
+    const batch: Uint8Array[] = [];
     for (const chunk of flattenTransformYieldSync(item as TransformYield)) {
       batch.push(chunk);
     }
-  }
-  if (batch.length > 0) {
-    yield batch;
+    if (batch.length > 0) {
+      yield batch;
+    }
   }
 }
 

@@ -22,6 +22,7 @@ import {
 
 import { isAsyncIterable, isSyncIterable } from './from.js';
 import { pull as pullWithTransforms } from './pull.js';
+import { allUint8Array } from './utils.js';
 
 // Shared TextEncoder instance
 const encoder = new TextEncoder();
@@ -500,9 +501,9 @@ class BroadcastWriter implements Writer, Drainable {
       throw new Error('Writer is closed');
     }
 
-    const converted = chunks.map((c) =>
-      typeof c === 'string' ? encoder.encode(c) : c
-    );
+    const converted = allUint8Array(chunks)
+      ? chunks.slice()
+      : chunks.map((c) => typeof c === 'string' ? encoder.encode(c) : c);
 
     // Try to write directly to buffer
     if (this.broadcast._write(converted)) {
@@ -643,9 +644,9 @@ class BroadcastWriter implements Writer, Drainable {
       return false;
     }
 
-    const converted = chunks.map((c) =>
-      typeof c === 'string' ? encoder.encode(c) : c
-    );
+    const converted = allUint8Array(chunks)
+      ? chunks.slice()
+      : chunks.map((c) => typeof c === 'string' ? encoder.encode(c) : c);
 
     if (this.broadcast._write(converted)) {
       for (const c of converted) {

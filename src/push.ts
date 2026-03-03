@@ -16,7 +16,7 @@ import type {
   Drainable,
 } from './types.js';
 import { drainableProtocol } from './types.js';
-import { toUint8Array } from './utils.js';
+import { toUint8Array, allUint8Array } from './utils.js';
 import { pull as pullWithTransforms } from './pull.js';
 
 // =============================================================================
@@ -580,7 +580,7 @@ class PushWriter implements Writer, Drainable {
   }
 
   async writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void> {
-    const bytes = chunks.map(c => toUint8Array(c));
+    const bytes = allUint8Array(chunks) ? chunks.slice() : chunks.map(c => toUint8Array(c));
     await this.queue.writeAsync(bytes, options?.signal);
   }
 
@@ -598,7 +598,7 @@ class PushWriter implements Writer, Drainable {
     if (!this.queue.canWriteSync()) {
       return false;
     }
-    const bytes = chunks.map(c => toUint8Array(c));
+    const bytes = allUint8Array(chunks) ? chunks.slice() : chunks.map(c => toUint8Array(c));
     return this.queue.writeSync(bytes);
   }
 

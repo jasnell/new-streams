@@ -17,6 +17,17 @@ export function toUint8Array(chunk: Uint8Array | string): Uint8Array {
 }
 
 /**
+ * Check if all chunks in an array are already Uint8Array (no strings).
+ * Short-circuits on the first string found.
+ */
+export function allUint8Array(chunks: (Uint8Array | string)[]): chunks is Uint8Array[] {
+  for (let i = 0; i < chunks.length; i++) {
+    if (typeof chunks[i] === 'string') return false;
+  }
+  return true;
+}
+
+/**
  * Calculate total byte length of an array of chunks.
  */
 function totalByteLength(chunks: Uint8Array[]): number {
