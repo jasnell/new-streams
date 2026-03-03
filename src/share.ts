@@ -198,7 +198,7 @@ class ShareImpl implements ShareInterface {
             return { done: true, value: undefined };
           },
 
-          async throw(error?: Error): Promise<IteratorResult<Uint8Array[]>> {
+          async throw(_error?: Error): Promise<IteratorResult<Uint8Array[]>> {
             state.detached = true;
             state.resolve = null;
             state.reject = null;
@@ -261,7 +261,7 @@ class ShareImpl implements ShareInterface {
    * Wait for buffer space based on backpressure policy.
    * Returns false if cancelled while waiting, or throws if strict policy.
    */
-  private async waitForBufferSpace(state: AsyncConsumerState): Promise<boolean> {
+  private async waitForBufferSpace(_state: AsyncConsumerState): Promise<boolean> {
     while (this.buffer.length >= this.options.highWaterMark) {
       if (this.cancelled || this.sourceError || this.sourceExhausted) {
         return !this.cancelled;
@@ -543,7 +543,7 @@ class SyncShareImpl implements SyncShareInterface {
             return { done: true, value: undefined };
           },
 
-          throw(error?: Error): IteratorResult<Uint8Array[]> {
+          throw(_error?: Error): IteratorResult<Uint8Array[]> {
             state.detached = true;
             self.consumers.delete(state);
             self.tryTrimBuffer();

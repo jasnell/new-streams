@@ -14,14 +14,19 @@
     "benchmark:deno": "deno run --allow-read --allow-env --allow-run benchmarks/run-all.ts",
     "benchmark:bun": "bun run benchmarks/run-all.ts",
     "html-samples": "node samples/html/server.mjs",
+    "lint": "eslint src/ benchmarks/ samples/",
+    "lint:fix": "eslint src/ benchmarks/ samples/ --fix",
     "slides": "slidev SLIDES.md"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@slidev/cli": "^52.11.5",
     "@types/node": "^20.11.0",
+    "eslint": "^10.0.2",
     "mitata": "^1.0.34",
     "tsx": "^4.7.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "typescript-eslint": "^8.56.1"
   },
   "keywords": [
     "streams",

@@ -370,7 +370,7 @@ export interface PushStreamOptions {
 /**
  * Result of Stream.push() - a WriterIterablePair.
  */
-export interface PushStreamResult extends WriterIterablePair {}
+export type PushStreamResult = WriterIterablePair;
 
 // =============================================================================
 // §8 Transform Types

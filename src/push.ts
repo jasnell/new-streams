@@ -611,7 +611,7 @@ class PushWriter implements Writer, Drainable {
     return this.queue.writeSync(bytes);
   }
 
-  end(options?: WriteOptions): Promise<number> {
+  end(_options?: WriteOptions): Promise<number> {
     // end() on PushQueue is synchronous (sets state, resolves pending reads).
     // Signal accepted for interface compliance but there is nothing to cancel.
     return Promise.resolve(this.queue.end());

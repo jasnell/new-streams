@@ -9,6 +9,7 @@ import {
   type Writer,
   type WriteOptions,
   type Broadcast as BroadcastInterface,
+  type BackpressurePolicy,
   type BroadcastOptions,
   type BroadcastResult,
   type Transform,
@@ -113,6 +114,14 @@ class BroadcastImpl implements BroadcastInterface {
     this.writer = w;
   }
 
+  get backpressurePolicy(): BackpressurePolicy {
+    return this.options.backpressure;
+  }
+
+  get highWaterMark(): number {
+    return this.options.highWaterMark;
+  }
+
   get consumerCount(): number {
     return this.consumers.size;
   }
@@ -207,7 +216,7 @@ class BroadcastImpl implements BroadcastInterface {
             return { done: true, value: undefined };
           },
 
-          async throw(error?: Error): Promise<IteratorResult<Uint8Array[]>> {
+          async throw(_error?: Error): Promise<IteratorResult<Uint8Array[]>> {
             state.detached = true;
             state.resolve = null;
             state.reject = null;
@@ -540,8 +549,8 @@ class BroadcastWriter implements Writer, Drainable {
 
     // Buffer is full - handle based on policy
     // Note: _canWrite() and _write() handle drop-* policies, so we only get here for strict/block
-    const policy = (this.broadcast as any).options?.backpressure ?? 'strict';
-    const highWaterMark = (this.broadcast as any).options?.highWaterMark ?? 16;
+    const policy = this.broadcast.backpressurePolicy;
+    const highWaterMark = this.broadcast.highWaterMark;
 
     if (policy === 'strict') {
       // In strict mode, highWaterMark limits pendingWrites (the "hose")
@@ -681,7 +690,7 @@ class BroadcastWriter implements Writer, Drainable {
     return false;
   }
 
-  end(options?: WriteOptions): Promise<number> {
+  end(_options?: WriteOptions): Promise<number> {
     // end() is synchronous internally — signal accepted for interface compliance.
     if (this.closed) return Promise.resolve(this.totalBytes);
     this.closed = true;

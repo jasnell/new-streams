@@ -34,7 +34,7 @@ function fromNodeReadable(readable: Readable) {
   return Stream.from(
     (async function* () {
       // Track if we need to destroy the readable on cleanup
-      let destroyed = false;
+      const destroyed = false;
 
       try {
         // Use async iteration (Node.js 10+)
@@ -51,13 +51,9 @@ function fromNodeReadable(readable: Readable) {
             throw new Error(`Unexpected chunk type: ${typeof chunk}`);
           }
         }
-      } catch (error) {
-        // Error from Node.js stream - propagate it
-        throw error;
       } finally {
         // Cleanup: destroy the readable if not already destroyed
         if (!destroyed && !readable.destroyed) {
-          destroyed = true;
           readable.destroy();
         }
       }

@@ -550,7 +550,7 @@ export function merge(
 
           // Collect all pending promises
           const pending = states
-            .map((state, index) => (state.pending ? state.pending : null))
+            .map((state, _index) => (state.pending ? state.pending : null))
             .filter((p): p is NonNullable<typeof p> => p !== null);
 
           if (pending.length === 0) {

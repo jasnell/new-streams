@@ -388,7 +388,6 @@ async function* normalizeAsyncSource(
   // but we can collect them all into a single batch since they're synchronously available
   if (isSyncIterable(source)) {
     const batch: Uint8Array[] = [];
-    let hasAsyncValues = false;
 
     for (const value of source) {
       // Fast path 1: value is already a Uint8Array[] batch
@@ -414,7 +413,6 @@ async function* normalizeAsyncSource(
         yield batch.slice();
         batch.length = 0;
       }
-      hasAsyncValues = true;
       const asyncBatch: Uint8Array[] = [];
       for await (const chunk of normalizeAsyncValue(value as AsyncStreamableYield)) {
         asyncBatch.push(chunk);
