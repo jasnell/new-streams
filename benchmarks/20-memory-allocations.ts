@@ -121,6 +121,28 @@ boxplot(() => {
       };
     }).gc('inner');
 
+    bench('push writeSync+ondrain (new)', function* () {
+      yield async () => {
+        const { writer, readable } = Stream.push({ highWaterMark: 100 });
+        const producing = (async () => {
+          for (const chunk of smallChunks) {
+            if (!writer.writeSync(chunk)) {
+              const canWrite = await Stream.ondrain(writer);
+              if (!canWrite) break;
+              writer.writeSync(chunk);
+            }
+          }
+          await writer.end();
+        })();
+        let total = 0;
+        for await (const batch of readable) {
+          for (const c of batch) total += c.byteLength;
+        }
+        await producing;
+        do_not_optimize(total);
+      };
+    }).gc('inner');
+
     bench('push write/read (web)', function* () {
       yield async () => {
         let ctrl!: ReadableStreamDefaultController<Uint8Array>;
