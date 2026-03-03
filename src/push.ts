@@ -19,6 +19,9 @@ import { drainableProtocol } from './types.js';
 import { toUint8Array, allUint8Array } from './utils.js';
 import { pull as pullWithTransforms } from './pull.js';
 
+// Cached resolved promise to avoid allocating a new one on every sync fast-path.
+const kResolvedPromise: Promise<void> = Promise.resolve();
+
 // =============================================================================
 // Internal Queue State
 // =============================================================================
@@ -574,14 +577,24 @@ class PushWriter implements Writer, Drainable {
     return this.queue.desiredSize;
   }
 
-  async write(chunk: Uint8Array | string, options?: WriteOptions): Promise<void> {
+  write(chunk: Uint8Array | string, options?: WriteOptions): Promise<void> {
+    if (!options?.signal && this.queue.canWriteSync()) {
+      const bytes = toUint8Array(chunk);
+      this.queue.writeSync([bytes]);
+      return kResolvedPromise;
+    }
     const bytes = toUint8Array(chunk);
-    await this.queue.writeAsync([bytes], options?.signal);
+    return this.queue.writeAsync([bytes], options?.signal);
   }
 
-  async writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void> {
+  writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void> {
+    if (!options?.signal && this.queue.canWriteSync()) {
+      const bytes = allUint8Array(chunks) ? chunks.slice() : chunks.map(c => toUint8Array(c));
+      this.queue.writeSync(bytes);
+      return kResolvedPromise;
+    }
     const bytes = allUint8Array(chunks) ? chunks.slice() : chunks.map(c => toUint8Array(c));
-    await this.queue.writeAsync(bytes, options?.signal);
+    return this.queue.writeAsync(bytes, options?.signal);
   }
 
   writeSync(chunk: Uint8Array | string): boolean {
@@ -602,18 +615,19 @@ class PushWriter implements Writer, Drainable {
     return this.queue.writeSync(bytes);
   }
 
-  async end(options?: WriteOptions): Promise<number> {
+  end(options?: WriteOptions): Promise<number> {
     // end() on PushQueue is synchronous (sets state, resolves pending reads).
     // Signal accepted for interface compliance but there is nothing to cancel.
-    return this.queue.end();
+    return Promise.resolve(this.queue.end());
   }
 
   endSync(): number {
     return this.queue.end();
   }
 
-  async fail(reason?: Error): Promise<void> {
+  fail(reason?: Error): Promise<void> {
     this.queue.fail(reason);
+    return kResolvedPromise;
   }
 
   failSync(reason?: Error): boolean {

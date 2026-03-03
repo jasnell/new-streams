@@ -27,6 +27,9 @@ import { allUint8Array } from './utils.js';
 // Shared TextEncoder instance
 const encoder = new TextEncoder();
 
+// Cached resolved promise to avoid allocating a new one on every sync fast-path.
+const kResolvedPromise: Promise<void> = Promise.resolve();
+
 // Non-exported symbol for internal cancel notification from BroadcastImpl to BroadcastWriter.
 // Because this symbol is not exported, external code cannot call it.
 const cancelWriter = Symbol('cancelWriter');
@@ -485,11 +488,33 @@ class BroadcastWriter implements Writer, Drainable {
     return this.broadcast._getDesiredSize();
   }
 
-  async write(chunk: Uint8Array | string, options?: WriteOptions): Promise<void> {
+  write(chunk: Uint8Array | string, options?: WriteOptions): Promise<void> {
+    // Fast path: no signal, writer open, buffer has space
+    if (!options?.signal && !this.closed && !this.aborted && this.broadcast._canWrite()) {
+      const converted = typeof chunk === 'string' ? encoder.encode(chunk) : chunk;
+      this.broadcast._write([converted]);
+      this.totalBytes += converted.byteLength;
+      return kResolvedPromise;
+    }
     return this.writev([chunk], options);
   }
 
-  async writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void> {
+  writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void> {
+    // Fast path: no signal, writer open, buffer has space
+    if (!options?.signal && !this.closed && !this.aborted && this.broadcast._canWrite()) {
+      const converted = allUint8Array(chunks)
+        ? chunks.slice()
+        : chunks.map((c) => typeof c === 'string' ? encoder.encode(c) : c);
+      this.broadcast._write(converted);
+      for (const c of converted) {
+        this.totalBytes += c.byteLength;
+      }
+      return kResolvedPromise;
+    }
+    return this._writevSlow(chunks, options);
+  }
+
+  private async _writevSlow(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void> {
     const signal = options?.signal;
 
     // Check for pre-aborted signal
@@ -657,14 +682,14 @@ class BroadcastWriter implements Writer, Drainable {
     return false;
   }
 
-  async end(options?: WriteOptions): Promise<number> {
+  end(options?: WriteOptions): Promise<number> {
     // end() is synchronous internally — signal accepted for interface compliance.
-    if (this.closed) return this.totalBytes;
+    if (this.closed) return Promise.resolve(this.totalBytes);
     this.closed = true;
     this.broadcast._end();
     // Resolve pending drains with false - writer closed, no more writes accepted
     this.resolvePendingDrains(false);
-    return this.totalBytes;
+    return Promise.resolve(this.totalBytes);
   }
 
   endSync(): number {
@@ -676,8 +701,8 @@ class BroadcastWriter implements Writer, Drainable {
     return this.totalBytes;
   }
 
-  async fail(reason?: Error): Promise<void> {
-    if (this.aborted) return;
+  fail(reason?: Error): Promise<void> {
+    if (this.aborted) return kResolvedPromise;
     this.aborted = true;
     this.closed = true;
     const error = reason ?? new Error('Failed');
@@ -685,6 +710,7 @@ class BroadcastWriter implements Writer, Drainable {
     // Reject pending drains with the error
     this.rejectPendingDrains(error);
     this.broadcast._abort(error);
+    return kResolvedPromise;
   }
 
   failSync(reason?: Error): boolean {
