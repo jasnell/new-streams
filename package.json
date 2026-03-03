@@ -1,6 +1,6 @@
 {
   "name": "new-streams",
-  "version": "0.1.1",
+  "version": "0.2.2",
   "author": "James M Snell <jasnell@gmail.com>",
   "description": "Prototype implementation of a redesigned Web Streams API",
   "type": "module",
