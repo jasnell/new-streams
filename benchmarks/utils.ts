@@ -23,6 +23,8 @@ export interface BenchmarkComparison {
   webStream: BenchmarkResult;
   speedup: number;
   speedupConfidence: string; // e.g., "significant" or "within noise"
+  label1?: string; // Column header for first result (default: "New Stream")
+  label2?: string; // Column header for second result (default: "Web Stream")
 }
 
 export interface ThreeWayComparison {
@@ -226,12 +228,15 @@ export function printResult(result: BenchmarkResult): void {
 /**
  * Print benchmark comparison table
  */
-export function printComparison(comparisons: BenchmarkComparison[]): void {
-  console.log('\n' + '='.repeat(110));
-  console.log('BENCHMARK RESULTS (higher throughput = better)');
-  console.log('='.repeat(110));
-
-  const headers = ['Scenario', 'New Stream', 'Web Stream', 'Difference', 'Significance'];
+/**
+ * Print a single comparison table with the given column headers and rows.
+ */
+function printComparisonTable(
+  label1: string,
+  label2: string,
+  rows: BenchmarkComparison[]
+): void {
+  const headers = ['Scenario', label1, label2, 'Difference', 'Significance'];
   const colWidths = [32, 22, 22, 18, 14];
 
   // Print header
@@ -239,12 +244,12 @@ export function printComparison(comparisons: BenchmarkComparison[]): void {
   console.log(colWidths.map((w) => '-'.repeat(w)).join('-+-'));
 
   // Print rows
-  for (const c of comparisons) {
-    const newStreamStr = c.newStream.bytesPerSec
+  for (const c of rows) {
+    const str1 = c.newStream.bytesPerSec
       ? formatBytesPerSec(c.newStream.bytesPerSec)
       : `${formatTime(c.newStream.mean)}`;
 
-    const webStreamStr = c.webStream.bytesPerSec
+    const str2 = c.webStream.bytesPerSec
       ? formatBytesPerSec(c.webStream.bytesPerSec)
       : `${formatTime(c.webStream.mean)}`;
 
@@ -255,34 +260,56 @@ export function printComparison(comparisons: BenchmarkComparison[]): void {
 
     const row = [
       c.scenario.substring(0, colWidths[0] - 1),
-      newStreamStr,
-      webStreamStr,
+      str1,
+      str2,
       speedupStr,
       c.speedupConfidence,
     ];
 
     console.log(row.map((v, i) => v.padEnd(colWidths[i])).join(' | '));
   }
+}
 
-  console.log('='.repeat(110));
+export function printComparison(comparisons: BenchmarkComparison[]): void {
+  // Group comparisons by their label pair
+  const groups = new Map<string, BenchmarkComparison[]>();
+  for (const c of comparisons) {
+    const key = `${c.label1 ?? 'New Stream'}\0${c.label2 ?? 'Web Stream'}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(c);
+  }
 
-  // Print summary statistics
-  const validComparisons = comparisons.filter((c) => c.speedupConfidence === 'significant');
-  const fasterCount = validComparisons.filter((c) => c.speedup >= 1).length;
-  const slowerCount = validComparisons.filter((c) => c.speedup < 1).length;
-  const withinNoiseCount = comparisons.length - validComparisons.length;
+  for (const [key, rows] of groups) {
+    const [label1, label2] = key.split('\0');
 
-  console.log(`\nSummary: ${fasterCount} faster, ${slowerCount} slower, ${withinNoiseCount} within noise`);
-  console.log(`Samples per benchmark: ${comparisons[0]?.newStream.iterations || 'N/A'}`);
+    console.log('\n' + '='.repeat(110));
+    console.log(`BENCHMARK RESULTS: ${label1} vs ${label2} (higher throughput = better)`);
+    console.log('='.repeat(110));
+
+    printComparisonTable(label1, label2, rows);
+
+    console.log('='.repeat(110));
+
+    // Print summary statistics for this group
+    const validComparisons = rows.filter((c) => c.speedupConfidence === 'significant');
+    const fasterCount = validComparisons.filter((c) => c.speedup >= 1).length;
+    const slowerCount = validComparisons.filter((c) => c.speedup < 1).length;
+    const withinNoiseCount = rows.length - validComparisons.length;
+
+    console.log(`\nSummary: ${fasterCount} ${label1} faster, ${slowerCount} slower, ${withinNoiseCount} within noise`);
+    console.log(`Samples per benchmark: ${rows[0]?.newStream.iterations || 'N/A'}`);
+  }
 }
 
 /**
- * Create a comparison object
+ * Create a comparison object.
+ * Optional labels override the default "New Stream" / "Web Stream" column headers.
  */
 export function createComparison(
   scenario: string,
   newStream: BenchmarkResult,
-  webStream: BenchmarkResult
+  webStream: BenchmarkResult,
+  labels?: { label1: string; label2: string }
 ): BenchmarkComparison {
   const speedup = newStream.bytesPerSec && webStream.bytesPerSec
     ? newStream.bytesPerSec / webStream.bytesPerSec
@@ -294,6 +321,8 @@ export function createComparison(
     webStream,
     speedup,
     speedupConfidence: assessSignificance(newStream, webStream, speedup),
+    label1: labels?.label1,
+    label2: labels?.label2,
   };
 }
 

@@ -115,7 +115,7 @@ async function runBenchmarks(): Promise<void> {
       { totalBytes, minSamples: 15, minTimeMs: 3000 }
     );
 
-    comparisons.push(createComparison('broadcast vs share (2 consumers)', broadcastResult, shareResult));
+    comparisons.push(createComparison('2 consumers (4KB x 500)', broadcastResult, shareResult, { label1: 'broadcast()', label2: 'share()' }));
   }
 
   // Scenario 1b: With transforms on consumers
@@ -186,7 +186,7 @@ async function runBenchmarks(): Promise<void> {
       { totalBytes, minSamples: 15, minTimeMs: 3000 }
     );
 
-    comparisons.push(createComparison('broadcast vs share (w/ transforms)', broadcastResult, shareResult));
+    comparisons.push(createComparison('w/ transforms (4KB x 500)', broadcastResult, shareResult, { label1: 'broadcast()', label2: 'share()' }));
   }
 
   // ============================================================================
@@ -561,7 +561,7 @@ async function runBenchmarks(): Promise<void> {
       { totalBytes, minSamples: 15, minTimeMs: 2000 }
     );
 
-    comparisons.push(createComparison('pipeToSync vs pipeTo', pipeToSyncResult, pipeToAsyncResult));
+    comparisons.push(createComparison('pipeToSync vs pipeTo (4KB x 500)', pipeToSyncResult, pipeToAsyncResult, { label1: 'pipeToSync()', label2: 'pipeTo() async' }));
   }
 
   // ============================================================================
@@ -662,16 +662,17 @@ async function runBenchmarks(): Promise<void> {
       });
     };
 
-    // Stateful transform: count bytes and prefix each chunk with count
+    // Stateful transform: same XOR work, but via async generator (stateful API)
     const statefulTransform: Transform = {
-
       transform: async function* (source) {
-        let byteCount = 0;
         for await (const batch of source) {
           if (batch === null) continue;
           for (const chunk of batch) {
-            byteCount += chunk.byteLength;
-            yield chunk;
+            const result = new Uint8Array(chunk.length);
+            for (let i = 0; i < chunk.length; i++) {
+              result[i] = chunk[i] ^ 0x42;
+            }
+            yield result;
           }
         }
       },
@@ -705,7 +706,112 @@ async function runBenchmarks(): Promise<void> {
       { totalBytes, minSamples: 15, minTimeMs: 3000 }
     );
 
-    comparisons.push(createComparison('Stateless vs Stateful transform', statelessResult, statefulResult));
+    comparisons.push(createComparison('XOR transform (4KB x 500)', statelessResult, statefulResult, { label1: 'Stateless (fn)', label2: 'Stateful (gen)' }));
+  }
+
+  // ============================================================================
+  // Section 6: Many-consumer broadcast (Item C: O(C²) → O(C))
+  // ============================================================================
+  console.log('\n--- Section 6: Many-Consumer Broadcast ---');
+
+  console.log('Running: broadcast with many consumers...');
+  {
+    const chunkSize = 1024;
+    const chunkCount = 200;
+    const totalBytes = chunkSize * chunkCount;
+    const chunks = generateChunks(chunkSize, chunkCount);
+
+    const consumerCounts = [2, 10, 50, 100];
+    const manyConsumerResults: BenchmarkResult[] = [];
+
+    for (const numConsumers of consumerCounts) {
+      const result = await benchmark(
+        `broadcast ${numConsumers} consumers`,
+        async () => {
+          const { writer, broadcast } = Stream.broadcast({
+            highWaterMark: 50,
+            backpressure: 'block',
+          });
+
+          // Create N consumers
+          const consumers: AsyncIterable<Uint8Array[]>[] = [];
+          for (let i = 0; i < numConsumers; i++) {
+            consumers.push(broadcast.push());
+          }
+
+          // Producer writes all chunks then ends
+          const producerTask = (async () => {
+            for (const chunk of chunks) {
+              await writer.write(chunk);
+            }
+            await writer.end();
+          })();
+
+          // Each consumer drains to bytes
+          const consumerTasks = consumers.map((c) => Stream.bytes(c));
+
+          await Promise.all([producerTask, ...consumerTasks]);
+        },
+        { totalBytes: totalBytes * numConsumers, minSamples: 15, minTimeMs: 2000 }
+      );
+
+      manyConsumerResults.push(result);
+    }
+
+    singleResults.push({ title: 'Many-Consumer Broadcast', results: manyConsumerResults });
+  }
+
+  // ============================================================================
+  // Section 7: Transform chain depth (Item A: stateless fusion)
+  // ============================================================================
+  console.log('\n--- Section 7: Transform Chain Depth ---');
+
+  console.log('Running: transform chain depth comparison...');
+  {
+    const chunkSize = 4 * 1024;
+    const chunkCount = 500;
+    const totalBytes = chunkSize * chunkCount;
+    const chunks = generateChunks(chunkSize, chunkCount);
+
+    // Simple stateless XOR transform
+    const xor: Transform = (batch) => {
+      if (batch === null) return null;
+      return batch.map(chunk => {
+        const result = new Uint8Array(chunk.length);
+        for (let i = 0; i < chunk.length; i++) {
+          result[i] = chunk[i] ^ 0x42;
+        }
+        return result;
+      });
+    };
+
+    const chainDepths = [1, 3, 5];
+    const chainResults: BenchmarkResult[] = [];
+
+    for (const depth of chainDepths) {
+      const transforms: Transform[] = [];
+      for (let i = 0; i < depth; i++) {
+        transforms.push(xor);
+      }
+
+      const result = await benchmark(
+        `${depth} stateless transform${depth > 1 ? 's' : ''}`,
+        async () => {
+          const source = Stream.from(chunks);
+          const pipeline = Stream.pull(source, ...transforms);
+          const result = await Stream.bytes(pipeline);
+
+          if (result.length !== totalBytes) {
+            throw new Error('Wrong size');
+          }
+        },
+        { totalBytes, minSamples: 15, minTimeMs: 2000 }
+      );
+
+      chainResults.push(result);
+    }
+
+    singleResults.push({ title: 'Transform Chain Depth (stateless)', results: chainResults });
   }
 
   // ============================================================================

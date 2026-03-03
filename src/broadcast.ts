@@ -415,7 +415,6 @@ class BroadcastImpl implements BroadcastInterface {
           consumer.resolve = null;
           consumer.reject = null;
           resolve({ done: false, value: chunk });
-          this.tryTrimBuffer();
         }
       }
     }
