@@ -701,7 +701,7 @@ class BroadcastWriter implements Writer, Drainable {
   }
 
   endSync(): number {
-    if (this.closed) return this.totalBytes;
+    if (this.closed) return -1;
     this.closed = true;
     this.broadcast._end();
     // Resolve pending drains with false - writer closed, no more writes accepted

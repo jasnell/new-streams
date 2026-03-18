@@ -195,10 +195,11 @@ interface Writer {
   end(options?: WriteOptions): Promise<number>;
   fail(reason?: Error): Promise<void>;
 
-  // Synchronous variants return true if accepted, false if rejected.
+  // Synchronous variants: writeSync/writevSync/failSync return boolean;
+  // endSync returns byte count (>= 0) on success, -1 on failure.
   writeSync(chunk: Uint8Array | string): boolean;
   writevSync(chunks: (Uint8Array | string)[]): boolean;
-  endSync(): number;
+  endSync(): number;  // >= 0: total bytes written, -1: cannot end synchronously
   failSync(reason?: Error): boolean;
 }
 ```
@@ -219,16 +220,23 @@ interface Writer {
 
 - `fail(reason)`: Put the writer into an error state. Notifies consumers of failure.
 
-The `writeSync`/`writevSync`/`failSync`,`endSync` methods return a boolean
-indicating if the action was accepted (`true`) or rejected (`false`). They are
-intended for high-performance scenarios, used in conjunction with
-`write`/`writev`/`end`/`fail` for mixed sync/async:
+The `writeSync`/`writevSync`/`failSync` methods return a boolean indicating if
+the action was accepted (`true`) or rejected (`false`). The `endSync` method
+returns the total bytes written (>= 0) on success, or `-1` if the writer is
+not in a state where it can be ended synchronously. These are intended for
+high-performance scenarios, used in conjunction with `write`/`writev`/`end`/`fail`
+for mixed sync/async:
 
 ```js
 // Attempt to write synchronously first
 if (!writer.writeSync(chunk)) {
   // If that fails, fall back to async write
   await writer.write(chunk);
+}
+
+// End with try-fallback pattern
+if (writer.endSync() < 0) {
+  await writer.end();
 }
 ```
 

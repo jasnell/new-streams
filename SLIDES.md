@@ -94,7 +94,6 @@ for await (const chunks of readable) {
 ### Complexity Bugs
 - React SSR deadlocks with nested Suspense
 - AWS SDK v3 memory explosion on slow processing
-- Deno HTTP server DoS vulnerability
 
 </div>
 </div>
@@ -104,6 +103,32 @@ for await (const chunks of readable) {
 All stem from the same root causes: **hidden buffering**, **implicit backpressure**, and **complex state machines**.
 
 </v-click>
+
+---
+
+# "Complexity is the Job"
+- As system engineers, our job is to manage complexity.
+- But unnecessary complexity is a liability, not a virtue.
+- A simpler API allows us to focus on real problems, not API quirks.
+
+---
+
+# "Naive implementations are going to be bad"
+
+- A naive implementation of Web Streams is easy to write, but performs terribly.
+- The complexity and performance pitfall can be optimized away in hidden layers
+- But that doesn't help users who write their own implementations
+- It doesn't help runtimes that need to try to improve the performance of
+  observable patterns like `tee()`, BYOB, underlying source, etc.
+
+---
+
+# "ReadableStream is here to stay."
+
+- True, but it doesn't have to be the only option.
+- We can offer a new, better-designed API for users who want it.
+- We can interoperate between the two APIs where needed.
+- The existence of a better alternative can also drive improvements in the old API.
 
 ---
 layout: section
@@ -432,7 +457,7 @@ Key insight: **Batching amortizes async overhead** - the more transforms and sma
 
 ### Much Faster
 
-- Chained transforms (70-104x)
+- Chained transforms (70-120x)
 - Simple pipelines (19-22x)
 - Async iteration (12-18x)
 - Small/tiny chunks (2-5x)
@@ -512,6 +537,12 @@ layout: center
 class: text-center
 ---
 
-# Questions?
+# Thank you
 
-[API Reference](API.md) | [Samples](samples/) | [Benchmarks](benchmarks/)
+https://github.com/jasnell/new-streams
+
+BTW! I'm writing a book.
+
+JavaScript in Depth (Manning)
+
+https://www.manning.com/books/javascript-in-depth

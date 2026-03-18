@@ -128,6 +128,10 @@ class PushQueue {
   // Writer Methods
   // ===========================================================================
 
+  get isOpen(): boolean {
+    return this.writerState === 'open';
+  }
+
   /**
    * Get slots available before hitting highWaterMark.
    * Returns null if writer is closed/errored or consumer has terminated.
@@ -618,6 +622,7 @@ class PushWriter implements Writer, Drainable {
   }
 
   endSync(): number {
+    if (!this.queue.isOpen) return -1;
     return this.queue.end();
   }
 

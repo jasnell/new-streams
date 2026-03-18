@@ -71,7 +71,7 @@ export function duplex(options?: DuplexOptions): [DuplexChannel, DuplexChannel] 
       const writer = aWriterRef;
       aWriterRef = null;
       // Try sync first, fall back to async
-      if (!writer.endSync()) {
+      if (writer.endSync() < 0) {
         await writer.end();
       }
     },
@@ -90,7 +90,7 @@ export function duplex(options?: DuplexOptions): [DuplexChannel, DuplexChannel] 
       const writer = bWriterRef;
       bWriterRef = null;
       // Try sync first, fall back to async
-      if (!writer.endSync()) {
+      if (writer.endSync() < 0) {
         await writer.end();
       }
     },

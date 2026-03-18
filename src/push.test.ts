@@ -284,6 +284,17 @@ describe('push()', () => {
 
       assert.strictEqual(total, 5);
     });
+
+    // PUSH-009b: Writer.endSync() returns -1 when writer is not open
+    it('endSync should return -1 when already closed [PUSH-009b]', () => {
+      const { writer } = push({ highWaterMark: 10 });
+
+      writer.writeSync('hello');
+      writer.endSync();
+
+      // Second call should return -1
+      assert.strictEqual(writer.endSync(), -1);
+    });
   });
 
   describe('fail() propagates error', () => {
