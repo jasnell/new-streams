@@ -10,7 +10,7 @@
 // (adding some Web Streams overhead inside the New Streams pipeline).
 
 import { pull } from '../src/index.ts';
-import type { TransformObject, TransformOptions } from '../src/types.ts';
+import type { TransformObject, TransformCallbackOptions } from '../src/types.ts';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -111,7 +111,7 @@ function compressGzip(): TransformObject {
   return {
     async *transform(
       source: AsyncIterable<Uint8Array[] | null>,
-      options: TransformOptions,
+      options: TransformCallbackOptions,
     ) {
       // Create a native CompressionStream and wire it up.
       // Use a two-task pattern: one async task feeds the compressor,

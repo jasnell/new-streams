@@ -173,7 +173,11 @@
               for (const c of chunks) await this.write(c);
             }
             async end() { this._closed = true; return 0; }
-            async abort() { this._closed = true; }
+            async fail() { this._closed = true; }
+            writeSync() { return false; }
+            writevSync() { return false; }
+            endSync() { return -1; }
+            failSync() { return false; }
           }
           
           const { writer: pushWriter, readable } = Stream.push();

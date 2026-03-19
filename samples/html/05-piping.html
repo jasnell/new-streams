@@ -128,9 +128,14 @@
         return this._byteCount;
       }
       
-      async abort(reason) {
+      async fail(reason) {
         this._closed = true;
       }
+
+      writeSync(chunk) { return false; }
+      writevSync(chunks) { return false; }
+      endSync() { return -1; }
+      failSync(reason) { return false; }
       
       getText() {
         return this.chunks.map(c => dec.decode(c, { stream: true })).join('') + dec.decode();

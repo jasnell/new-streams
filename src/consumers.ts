@@ -9,18 +9,18 @@
 import {
   type ConsumeOptions,
   type ConsumeSyncOptions,
-  type TextOptions,
-  type TextSyncOptions,
+  type TextConsumeOptions,
+  type TextConsumeSyncOptions,
   type MergeOptions,
   type Transform,
-  type TransformOptions,
+  type TransformCallbackOptions,
   type SyncTransform,
   type ByteStreamReadable,
   type Drainable,
   drainableProtocol,
 } from './types.js';
 
-import { isAsyncIterable, isSyncIterable } from './from.js';
+import { from, isAsyncIterable, isSyncIterable } from './from.js';
 import { concatBytes } from './utils.js';
 
 // =============================================================================
@@ -84,7 +84,7 @@ export function bytesSync(
  */
 export function textSync(
   source: Iterable<Uint8Array[]>,
-  options?: TextSyncOptions
+  options?: TextConsumeSyncOptions
 ): string {
   const data = bytesSync(source, options);
   const decoder = new TextDecoder(options?.encoding ?? 'utf-8', {
@@ -241,7 +241,7 @@ export async function bytes(
  */
 export async function text(
   source: AsyncIterable<Uint8Array[]> | Iterable<Uint8Array[]>,
-  options?: TextOptions
+  options?: TextConsumeOptions
 ): Promise<string> {
   const data = await bytes(source, options);
   const decoder = new TextDecoder(options?.encoding ?? 'utf-8', {
@@ -369,7 +369,7 @@ export type TapCallback = (chunks: Uint8Array[] | null) => void;
  */
 export type TapCallbackAsync = (
   chunks: Uint8Array[] | null,
-  options: TransformOptions
+  options: TransformCallbackOptions
 ) => void | Promise<void>;
 
 /**
@@ -380,7 +380,7 @@ export type TapCallbackAsync = (
  * @returns Transform that passes chunks through unchanged
  */
 export function tap(callback: TapCallbackAsync): Transform {
-  return async (chunks: Uint8Array[] | null, options: TransformOptions) => {
+  return async (chunks: Uint8Array[] | null, options: TransformCallbackOptions) => {
     await callback(chunks, options);
     return chunks;
   };
@@ -481,18 +481,22 @@ export function ondrain(drainable: unknown): Promise<boolean> | null {
  * @returns Async iterable yielding batches from any source in arrival order
  */
 export function merge(
-  ...args: (AsyncIterable<Uint8Array[]> | MergeOptions)[]
+  ...args: (unknown | MergeOptions)[]
 ): ByteStreamReadable {
-  // Parse arguments
-  let sources: AsyncIterable<Uint8Array[]>[];
+  // Parse arguments: last arg may be MergeOptions if it has a signal member
+  // and no iteration protocols
+  let rawSources: unknown[];
   let options: MergeOptions | undefined;
 
   if (args.length > 0 && isMergeOptions(args[args.length - 1])) {
     options = args[args.length - 1] as MergeOptions;
-    sources = args.slice(0, -1) as AsyncIterable<Uint8Array[]>[];
+    rawSources = args.slice(0, -1);
   } else {
-    sources = args as AsyncIterable<Uint8Array[]>[];
+    rawSources = args;
   }
+
+  // Normalize each source via from()
+  const sources = rawSources.map(s => from(s as any));
 
   return {
     async *[Symbol.asyncIterator]() {

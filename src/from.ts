@@ -451,6 +451,11 @@ async function* normalizeAsyncSource(
  * @returns A sync iterable yielding Uint8Array[] batches
  */
 export function fromSync(input: ByteInput | SyncStreamable): SyncByteStreamReadable {
+  // Null/undefined guard
+  if (input == null) {
+    throw new TypeError('Input must not be null or undefined');
+  }
+
   // Check for primitives first (ByteInput)
   if (isPrimitiveChunk(input)) {
     const chunk = primitiveToUint8Array(input);
@@ -484,6 +489,12 @@ export function fromSync(input: ByteInput | SyncStreamable): SyncByteStreamReada
     }
   }
 
+  // Check toStreamable protocol (takes precedence over iteration protocols)
+  if (isToStreamable(input)) {
+    const result = input[toStreamable]();
+    return fromSync(result as ByteInput | SyncStreamable);
+  }
+
   // Must be a SyncStreamable
   if (!isSyncIterable(input)) {
     throw new TypeError('Input must be a ByteInput or SyncStreamable');
@@ -507,6 +518,11 @@ export function fromSync(input: ByteInput | SyncStreamable): SyncByteStreamReada
  * @returns An async iterable yielding Uint8Array[] batches
  */
 export function from(input: ByteInput | Streamable): ByteStreamReadable {
+  // Null/undefined guard
+  if (input == null) {
+    throw new TypeError('Input must not be null or undefined');
+  }
+
   // Check for primitives first (ByteInput)
   if (isPrimitiveChunk(input)) {
     const chunk = primitiveToUint8Array(input);
@@ -549,6 +565,22 @@ export function from(input: ByteInput | Streamable): ByteStreamReadable {
         };
       }
     }
+  }
+
+  // Check toAsyncStreamable protocol (takes precedence)
+  if (isToAsyncStreamable(input)) {
+    return {
+      async *[Symbol.asyncIterator]() {
+        const result = await input[toAsyncStreamable]();
+        yield* normalizeAsyncSource(from(result as ByteInput | Streamable));
+      },
+    };
+  }
+
+  // Check toStreamable protocol
+  if (isToStreamable(input)) {
+    const result = input[toStreamable]();
+    return from(result as ByteInput | Streamable);
   }
 
   // Must be a Streamable (sync or async iterable)

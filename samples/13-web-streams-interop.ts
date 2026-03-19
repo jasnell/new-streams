@@ -175,12 +175,12 @@ function createWebWriter(writable: WritableStream<Uint8Array>): Writer {
       return -1; // Not supported
     },
 
-    async fail(reason?: Error): Promise<void> {
+    async fail(reason?: any): Promise<void> {
       closed = true;
       await webWriter.abort(reason);
     },
 
-    failSync(reason?: Error): boolean {
+    failSync(reason?: any): boolean {
       return false; // Not supported
     },
   };

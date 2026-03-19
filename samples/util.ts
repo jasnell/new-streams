@@ -74,11 +74,11 @@ export class MemoryWriter implements Writer {
     return this._byteCount;
   }
 
-  async fail(reason?: Error): Promise<void> {
+  async fail(reason?: any): Promise<void> {
     this._closed = true;
   }
 
-  failSync(reason?: Error): boolean {
+  failSync(reason?: any): boolean {
     this._closed = true;
     return true;
   }
@@ -99,17 +99,19 @@ export class SyncMemoryWriter implements SyncWriter {
     return this._closed ? null : 100;
   }
 
-  write(chunk: Uint8Array | string): void {
+  write(chunk: Uint8Array | string): boolean {
     if (this._closed) throw new Error('Writer is closed');
     const bytes = typeof chunk === 'string' ? this.enc.encode(chunk) : chunk;
     this.chunks.push(bytes);
     this._byteCount += bytes.byteLength;
+    return true;
   }
 
-  writev(chunks: (Uint8Array | string)[]): void {
+  writev(chunks: (Uint8Array | string)[]): boolean {
     for (const chunk of chunks) {
       this.write(chunk);
     }
+    return true;
   }
 
   end(): number {
@@ -117,7 +119,7 @@ export class SyncMemoryWriter implements SyncWriter {
     return this._byteCount;
   }
 
-  fail(reason?: Error): void {
+  fail(reason?: any): void {
     this._closed = true;
   }
 

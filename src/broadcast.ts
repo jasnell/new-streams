@@ -14,6 +14,7 @@ import {
   type BroadcastResult,
   type Transform,
   type PushStreamOptions,
+  type PullOptions,
   type Streamable,
   type Broadcastable,
   type Drainable,
@@ -135,7 +136,7 @@ class BroadcastImpl implements BroadcastInterface {
    * Optionally apply transforms to the consumer's data.
    */
   push(
-    ...args: (Transform | PushStreamOptions)[]
+    ...args: (Transform | PullOptions)[]
   ): AsyncIterable<Uint8Array[]> {
     const { transforms, options } = parsePushArgs(args);
 
@@ -691,8 +692,8 @@ class BroadcastWriter implements Writer, Drainable {
   }
 
   end(_options?: WriteOptions): Promise<number> {
-    // end() is synchronous internally — signal accepted for interface compliance.
-    if (this.closed) return Promise.resolve(this.totalBytes);
+    // end() rejects with TypeError if already closed/errored
+    if (this.closed || this.aborted) return Promise.reject(new TypeError('Writer is already closed or errored'));
     this.closed = true;
     this.broadcast._end();
     // Resolve pending drains with false - writer closed, no more writes accepted
@@ -709,8 +710,8 @@ class BroadcastWriter implements Writer, Drainable {
     return this.totalBytes;
   }
 
-  fail(reason?: Error): Promise<void> {
-    if (this.aborted) return kResolvedPromise;
+  fail(reason?: any): Promise<void> {
+    if (this.aborted || this.closed) return kResolvedPromise;
     this.aborted = true;
     this.closed = true;
     const error = reason ?? new Error('Failed');
@@ -721,8 +722,8 @@ class BroadcastWriter implements Writer, Drainable {
     return kResolvedPromise;
   }
 
-  failSync(reason?: Error): boolean {
-    if (this.aborted) return true;
+  failSync(reason?: any): boolean {
+    if (this.aborted || this.closed) return false;
     this.aborted = true;
     this.closed = true;
     const error = reason ?? new Error('Failed');
@@ -731,6 +732,14 @@ class BroadcastWriter implements Writer, Drainable {
     this.rejectPendingDrains(error);
     this.broadcast._abort(error);
     return true;
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    return this.fail();
+  }
+
+  [Symbol.dispose](): void {
+    this.failSync();
   }
 
   /**

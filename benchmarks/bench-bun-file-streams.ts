@@ -11,7 +11,7 @@
 // streaming ceiling.
 
 import { pull } from '../src/index.ts';
-import type { TransformOptions } from '../src/types.ts';
+import type { TransformCallbackOptions } from '../src/types.ts';
 import { createGzip, type Gzip } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -160,7 +160,7 @@ function compressGzip() {
   return {
     async *transform(
       source: AsyncIterable<Uint8Array[] | null>,
-      options: TransformOptions,
+      options: TransformCallbackOptions,
     ) {
       const gz: Gzip = createGzip();
       const pending: Uint8Array[] = [];

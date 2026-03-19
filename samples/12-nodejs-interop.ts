@@ -185,12 +185,12 @@ function createNodeWriter(writable: Writable): Writer {
       return byteCount;
     },
 
-    async fail(reason?: Error): Promise<void> {
+    async fail(reason?: any): Promise<void> {
       closed = true;
-      writable.destroy(reason);
+      writable.destroy(reason instanceof Error ? reason : new Error(String(reason)));
     },
 
-    failSync(reason?: Error): boolean {
+    failSync(reason?: any): boolean {
       closed = true;
       writable.destroy(reason);
       return true;

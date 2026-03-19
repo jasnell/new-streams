@@ -90,7 +90,7 @@ class PushQueue {
   private consumerState: ConsumerState = 'active';
 
   /** Error that closed the stream */
-  private error: Error | null = null;
+  private error: any = null;
 
   /** Total bytes written */
   private bytesWritten = 0;
@@ -178,12 +178,21 @@ class PushQueue {
       return false;
     }
 
-    // Handle based on backpressure policy
+    // Handle based on backpressure policy when buffer is full
     if (this.slots.length >= this.highWaterMark) {
       switch (this.backpressure) {
         case 'strict':
-        case 'block':
           return false; // Can't write synchronously
+
+        case 'block':
+          // Enqueue the data but return false as backpressure signal.
+          // The data IS accepted; false tells the caller to slow down.
+          this.slots.push(chunks);
+          for (const chunk of chunks) {
+            this.bytesWritten += chunk.byteLength;
+          }
+          this.resolvePendingReads();
+          return false;
 
         case 'drop-oldest':
           // Drop oldest slot to make room
@@ -233,12 +242,12 @@ class PushQueue {
 
     // Check if write is possible
     if (this.writerState !== 'open') {
-      throw new Error('Writer is closed');
+      throw new TypeError('Writer is closed');
     }
     if (this.consumerState !== 'active') {
       throw this.consumerState === 'thrown' && this.error
         ? this.error
-        : new Error('Stream closed by consumer');
+        : new TypeError('Stream closed by consumer');
     }
 
     // Try sync first
@@ -252,7 +261,7 @@ class PushQueue {
         // In strict mode, highWaterMark limits pendingWrites (the "hose")
         // If too many writes are already pending, caller is ignoring backpressure
         if (this.pendingWrites.length >= this.highWaterMark) {
-          throw new Error(
+          throw new RangeError(
             'Backpressure violation: too many pending writes. ' +
             'Await each write() call to respect backpressure.'
           );
@@ -310,7 +319,7 @@ class PushQueue {
    */
   end(): number {
     if (this.writerState !== 'open') {
-      return this.bytesWritten;
+      throw new TypeError('Writer is already closed or errored');
     }
 
     this.writerState = 'closed';
@@ -326,8 +335,8 @@ class PushQueue {
   /**
    * Put queue into terminal error state.
    */
-  fail(reason?: Error): void {
-    if (this.writerState === 'errored') {
+  fail(reason?: any): void {
+    if (this.writerState === 'errored' || this.writerState === 'closed') {
       return;
     }
 
@@ -495,7 +504,7 @@ class PushQueue {
   /**
    * Reject all pending drains with an error.
    */
-  private rejectPendingDrains(error: Error): void {
+  private rejectPendingDrains(error: any): void {
     const drains = this.pendingDrains;
     this.pendingDrains = [];
     for (const pending of drains) {
@@ -506,7 +515,7 @@ class PushQueue {
   /**
    * Reject all pending reads with an error.
    */
-  private rejectPendingReads(error: Error): void {
+  private rejectPendingReads(error: any): void {
     while (this.pendingReads.length > 0) {
       this.pendingReads.shift()!.reject(error);
     }
@@ -515,7 +524,7 @@ class PushQueue {
   /**
    * Reject all pending writes with an error.
    */
-  private rejectPendingWrites(error: Error): void {
+  private rejectPendingWrites(error: any): void {
     while (this.pendingWrites.length > 0) {
       this.pendingWrites.shift()!.reject(error);
     }
@@ -616,24 +625,38 @@ class PushWriter implements Writer, Drainable {
   }
 
   end(_options?: WriteOptions): Promise<number> {
-    // end() on PushQueue is synchronous (sets state, resolves pending reads).
-    // Signal accepted for interface compliance but there is nothing to cancel.
-    return Promise.resolve(this.queue.end());
+    // end() on PushQueue throws TypeError if already closed/errored.
+    try {
+      return Promise.resolve(this.queue.end());
+    } catch (e) {
+      return Promise.reject(e);
+    }
   }
 
   endSync(): number {
     if (!this.queue.isOpen) return -1;
+    // Also return -1 if the buffer is full (can't end synchronously)
+    if (this.queue.desiredSize === 0) return -1;
     return this.queue.end();
   }
 
-  fail(reason?: Error): Promise<void> {
+  fail(reason?: any): Promise<void> {
     this.queue.fail(reason);
     return kResolvedPromise;
   }
 
-  failSync(reason?: Error): boolean {
+  failSync(reason?: any): boolean {
+    const wasOpen = this.queue.isOpen;
     this.queue.fail(reason);
-    return true;
+    return wasOpen;
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    return this.fail();
+  }
+
+  [Symbol.dispose](): void {
+    this.failSync();
   }
 }
 

@@ -193,38 +193,43 @@ export interface Writer {
   /** Signal end synchronously. Returns total bytes written, or -1 if cannot complete sync. */
   endSync(): number;
 
-  /** Put writer into terminal error state. Downstream sees error. */
-  fail(reason?: Error): Promise<void>;
+  /** Put writer into terminal error state. Downstream sees error. Accepts any value as reason. */
+  fail(reason?: any): Promise<void>;
 
-  /** Put writer into terminal error state synchronously. Returns false if sync fail not possible. */
-  failSync(reason?: Error): boolean;
+  /** Put writer into terminal error state synchronously. Returns false if writer cannot transition. */
+  failSync(reason?: any): boolean;
 }
 
 /**
- * Sync writer interface.
+ * Sync writer interface for producing data.
  * 
- * All operations are synchronous. Throws when buffer is full (strict policy).
+ * Follows the same backpressure policies as Writer:
+ * - "block": write/writev enqueue and return true (space) or false (backpressure signal; data IS accepted)
+ * - "strict": writes exceeding buffer capacity throw RangeError
+ * - "drop-oldest"/"drop-newest": writes never fail
+ * - end() throws TypeError if already closed or errored
+ * - fail() is a no-op if already closed or errored
  */
 export interface SyncWriter {
   /**
-   * Slots available before hitting limit.
+   * Slots available in the internal buffer.
    * - Always >= 0 (never negative)
-   * - 0 means buffer is full, writes will throw
+   * - 0 means buffer is full
    * - null if writer is closed/failed
    */
   readonly desiredSize: number | null;
 
-  /** Write single chunk. Throws if buffer full. */
-  write(chunk: Uint8Array | string): void;
+  /** Write single chunk. Returns true if buffer has space, false as backpressure signal under "block". */
+  write(chunk: Uint8Array | string): boolean;
 
-  /** Write multiple chunks atomically. */
-  writev(chunks: (Uint8Array | string)[]): void;
+  /** Write multiple chunks atomically. All-or-nothing. Returns true/false like write(). */
+  writev(chunks: (Uint8Array | string)[]): boolean;
 
-  /** Signal end of stream. Returns total bytes written. */
+  /** Signal end of stream. Returns total bytes written. Throws TypeError if already closed/errored. */
   end(): number;
 
-  /** Put writer into terminal error state. */
-  fail(reason?: Error): void;
+  /** Put writer into terminal error state. No-op if already closed or errored. */
+  fail(reason?: any): void;
 }
 
 // =============================================================================
@@ -286,7 +291,7 @@ export interface DuplexChannel extends WriterIterablePair, AsyncDisposable {
 export interface DuplexDirectionOptions {
   /**
    * High water mark for this direction's buffer.
-   * @default 1
+    * Inherits from shared DuplexOptions if not specified.
    */
   highWaterMark?: number;
 
@@ -306,7 +311,7 @@ export interface DuplexDirectionOptions {
 export interface DuplexOptions {
   /**
    * High water mark for both directions (can be overridden per-direction).
-   * @default 1
+    * @default 4
    */
   highWaterMark?: number;
 
@@ -352,7 +357,7 @@ export type BackpressurePolicy =
 export interface PushStreamOptions {
   /**
    * Max pending write/writev calls (chunk-oriented, not byte-oriented).
-   * Default: 1 (strict backpressure - one pending write at a time).
+   * Default: 4.
    * Set to Infinity for unbounded buffering.
    */
   highWaterMark?: number;
@@ -404,7 +409,7 @@ export type AsyncTransformResult =
  * Options passed to transform functions by the pipeline.
  * Contains the pipeline's cancellation signal.
  */
-export interface TransformOptions {
+export interface TransformCallbackOptions {
   /** Signal that fires when the pipeline is cancelled, errors, or the
    *  consumer stops iteration. */
   readonly signal: AbortSignal;
@@ -416,7 +421,7 @@ export interface TransformOptions {
  */
 export type TransformFn = (
   chunks: Uint8Array[] | null,
-  options: TransformOptions
+  options: TransformCallbackOptions
 ) => AsyncTransformResult;
 
 /**
@@ -425,7 +430,7 @@ export type TransformFn = (
  */
 export type StatefulTransformFn = (
   source: AsyncIterable<Uint8Array[] | null>,
-  options: TransformOptions
+  options: TransformCallbackOptions
 ) => AsyncIterable<TransformYield> | AsyncGenerator<TransformYield, void, unknown>;
 
 /**
@@ -548,7 +553,7 @@ export interface ConsumeSyncOptions {
 /**
  * Options for text() - extends ConsumeOptions with encoding.
  */
-export interface TextOptions extends ConsumeOptions {
+export interface TextConsumeOptions extends ConsumeOptions {
   /**
    * Text encoding for decoding bytes. Any encoding supported by TextDecoder.
    * Default: 'utf-8'
@@ -559,7 +564,7 @@ export interface TextOptions extends ConsumeOptions {
 /**
  * Options for textSync().
  */
-export interface TextSyncOptions extends ConsumeSyncOptions {
+export interface TextConsumeSyncOptions extends ConsumeSyncOptions {
   /** Text encoding. Default: 'utf-8' */
   encoding?: string;
 }
@@ -610,7 +615,7 @@ export interface Broadcast {
    * Signature: push(...transforms, options?) where options is detected by
    * being an object without a 'transform' property.
    */
-  push(...args: (Transform | PushStreamOptions)[]): AsyncIterable<Uint8Array[]>;
+  push(...args: (Transform | PullOptions)[]): AsyncIterable<Uint8Array[]>;
 
   /** Number of currently attached consumers. */
   readonly consumerCount: number;
@@ -622,7 +627,7 @@ export interface Broadcast {
    * Cancel all branches.
    * If reason provided, branches see it as an error; otherwise clean completion.
    */
-  cancel(reason?: Error): void;
+  cancel(reason?: any): void;
 
   /** Support for `using` - defers to cancel(). */
   [Symbol.dispose](): void;
@@ -683,7 +688,7 @@ export interface Share {
    * Cancel all branches and close source.
    * If reason provided, branches see it as an error; otherwise clean completion.
    */
-  cancel(reason?: Error): void;
+  cancel(reason?: any): void;
 
   /** Support for `using`. */
   [Symbol.dispose](): void;
@@ -715,7 +720,7 @@ export interface SyncShare {
   readonly bufferSize: number;
 
   /** Cancel all branches and close source. */
-  cancel(reason?: Error): void;
+  cancel(reason?: any): void;
 
   /** Support for `using`. */
   [Symbol.dispose](): void;

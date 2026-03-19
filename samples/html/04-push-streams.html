@@ -214,9 +214,9 @@
         }
 
         // ============================================================
-        // Error handling with abort()
+        // Error handling with fail()
         // ============================================================
-        section('Error handling with abort()');
+        section('Error handling with fail()');
 
         {
           const { writer, readable } = Stream.push();
@@ -232,7 +232,7 @@
             await Stream.text(readable);
           } catch (err) {
             log(`Consumer caught error: "${err.message}"`);
-            success('abort() propagates errors');
+            success('fail() propagates errors');
           }
         }
 

@@ -656,16 +656,18 @@ describe('push()', () => {
       assert.strictEqual(chunks.length, 0);
     });
 
-    // PUSH-082: Multiple end() calls are idempotent
-    it('should handle multiple end() calls [PUSH-082]', async () => {
+    // PUSH-082: Second end() call rejects with TypeError
+    it('should reject second end() call with TypeError [PUSH-082]', async () => {
       const { writer } = push({ highWaterMark: 10 });
 
       await writer.write('hello');
       const first = await writer.end();
-      const second = await writer.end();
-
       assert.strictEqual(first, 5);
-      assert.strictEqual(second, 5);
+
+      await assert.rejects(
+        () => writer.end(),
+        (err: any) => err instanceof TypeError
+      );
     });
   });
 

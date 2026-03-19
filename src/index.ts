@@ -52,7 +52,7 @@ export type {
   TransformYield,
   TransformResult,
   AsyncTransformResult,
-  TransformOptions,
+  TransformCallbackOptions,
   TransformFn,
   StatefulTransformFn,
   TransformObject,
@@ -71,8 +71,8 @@ export type {
   PipeToSyncOptions,
   ConsumeOptions,
   ConsumeSyncOptions,
-  TextOptions,
-  TextSyncOptions,
+  TextConsumeOptions,
+  TextConsumeSyncOptions,
   MergeOptions,
 
   // Broadcast types

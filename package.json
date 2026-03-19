@@ -13,6 +13,8 @@
     "benchmark": "npx tsx benchmarks/run-all.ts",
     "benchmark:deno": "deno run --allow-read --allow-env --allow-run benchmarks/run-all.ts",
     "benchmark:bun": "bun run benchmarks/run-all.ts",
+    "samples": "for f in samples/[0-9]*.ts; do echo \"=== $f ===\"; npx tsx \"$f\" || true; done",
+    "samples:run": "npx tsx",
     "html-samples": "node samples/html/server.mjs",
     "lint": "eslint src/ benchmarks/ samples/",
     "lint:fix": "eslint src/ benchmarks/ samples/ --fix",

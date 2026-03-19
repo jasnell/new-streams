@@ -13,7 +13,7 @@ import {
   type Transform,
   type TransformObject,
   type TransformFn,
-  type TransformOptions,
+  type TransformCallbackOptions,
   type StatefulTransformFn,
   type TransformYield,
   type AsyncTransformResult,
@@ -365,7 +365,7 @@ function isUint8ArrayBatch(result: unknown): result is Uint8Array[] {
 async function* applyStatelessAsyncTransform(
   source: AsyncIterable<Uint8Array[] | null>,
   transform: TransformFn,
-  options: TransformOptions
+  options: TransformCallbackOptions
 ): AsyncGenerator<Uint8Array[]> {
   for await (const chunks of source) {
     const result = transform(chunks, options);
@@ -425,7 +425,7 @@ async function* applyStatelessAsyncTransform(
 async function* applyStatefulAsyncTransform(
   source: AsyncIterable<Uint8Array[] | null>,
   transform: StatefulTransformFn,
-  options: TransformOptions
+  options: TransformCallbackOptions
 ): AsyncGenerator<Uint8Array[]> {
   const output = transform(source, options);
   for await (const item of output) {
@@ -513,7 +513,7 @@ async function* createAsyncPipeline(
   // Apply transforms — each gets its own options object
   // Object = stateful, function = stateless
   for (const transform of transforms) {
-    const options: TransformOptions = { signal: controller.signal };
+    const options: TransformCallbackOptions = { signal: controller.signal };
     if (isTransformObject(transform)) {
       current = applyStatefulAsyncTransform(current, transform.transform, options);
     } else {
@@ -633,8 +633,14 @@ export function pipeToSync(
   try {
     for (const batch of pipeline) {
       for (const chunk of batch) {
-        writer.write(chunk);
         totalBytes += chunk.byteLength;
+      }
+      if ('writev' in writer && typeof writer.writev === 'function') {
+        writer.writev(batch);
+      } else {
+        for (const chunk of batch) {
+          writer.write(chunk);
+        }
       }
     }
 
@@ -643,7 +649,7 @@ export function pipeToSync(
     }
   } catch (error) {
     if (!options?.preventFail) {
-      writer.fail(error instanceof Error ? error : new Error(String(error)));
+      writer.fail(error);
     }
     throw error;
   }
