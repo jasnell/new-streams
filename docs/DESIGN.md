@@ -106,7 +106,7 @@ type PrimitiveChunk = string | ArrayBuffer | ArrayBufferView;
 
 ```typescript
 // Options passed to transform functions by the pipeline
-interface TransformOptions {
+interface TransformCallbackOptions {
   /** Signal that fires when the pipeline is cancelled, errors, or
    *  the consumer stops iteration. */
   readonly signal: AbortSignal;
@@ -115,13 +115,13 @@ interface TransformOptions {
 // Stateless transform - function called for each batch
 type TransformFn = (
   chunks: Uint8Array[] | null,
-  options: TransformOptions
+  options: TransformCallbackOptions
 ) => AsyncTransformResult;
 
 // Stateful transform - generator wrapping entire source
 type StatefulTransformFn = (
   source: AsyncIterable<Uint8Array[] | null>,
-  options: TransformOptions
+  options: TransformCallbackOptions
 ) => AsyncIterable<TransformYield>;
 
 // Transform object for stateful transforms
@@ -150,8 +150,8 @@ interface Writer {
   writevSync(chunks: (Uint8Array | string)[]): boolean;
   end(options?: WriteOptions): Promise<number>;
   endSync(): number;
-  fail(reason?: Error): Promise<void>;
-  failSync(reason?: Error): boolean;
+  fail(reason?: any): Promise<void>;
+  failSync(reason?: any): boolean;
 }
 ```
 
@@ -174,7 +174,7 @@ interface PushStreamOptions {
 ```
 
 **Behavior:**
-- Default `highWaterMark: 1` means only one pending write at a time (strictest backpressure)
+- Default `highWaterMark: 4` provides moderate buffering for typical workloads
 - Each `write()` or `writev()` call counts as a single slot
 - Consumer termination propagates to writer (breaking iteration closes writer)
 
@@ -353,8 +353,8 @@ function bytes(source, options?: ConsumeOptions): Promise<Uint8Array>
 function bytesSync(source, options?: ConsumeSyncOptions): Uint8Array
 
 // Collect and decode as text
-function text(source, options?: TextOptions): Promise<string>
-function textSync(source, options?: TextSyncOptions): string
+function text(source, options?: TextConsumeOptions): Promise<string>
+function textSync(source, options?: TextConsumeSyncOptions): string
 
 // Collect as ArrayBuffer
 function arrayBuffer(source, options?: ConsumeOptions): Promise<ArrayBuffer>
@@ -365,7 +365,7 @@ interface ConsumeOptions {
   limit?: number;  // Max bytes - throws if exceeded
 }
 
-interface TextOptions extends ConsumeOptions {
+interface TextConsumeOptions extends ConsumeOptions {
   encoding?: string;  // Default: 'utf-8'
 }
 ```
@@ -423,11 +423,11 @@ interface Broadcast {
   push(...transforms?, options?): AsyncIterable<Uint8Array[]>;
   readonly consumerCount: number;
   readonly bufferSize: number;
-  cancel(reason?: Error): void;
+  cancel(reason?: any): void;
 }
 
 interface BroadcastOptions {
-  bufferLimit?: number;           // Default: 16
+  highWaterMark?: number;           // Default: 16
   backpressure?: BackpressurePolicy;  // Default: 'strict'
   signal?: AbortSignal;
 }
@@ -441,7 +441,7 @@ interface BroadcastOptions {
 
 **Example:**
 ```typescript
-const { writer, broadcast } = Stream.broadcast({ bufferLimit: 100 });
+const { writer, broadcast } = Stream.broadcast({ highWaterMark: 100 });
 
 // Create consumers with different transforms
 const consumer1 = broadcast.push();
@@ -472,7 +472,7 @@ interface Share {
   pull(...transforms?, options?): AsyncIterable<Uint8Array[]>;
   readonly consumerCount: number;
   readonly bufferSize: number;
-  cancel(reason?: Error): void;
+  cancel(reason?: any): void;
 }
 ```
 
@@ -486,7 +486,7 @@ interface Share {
 
 **Example:**
 ```typescript
-const shared = Stream.share(fileStream, { bufferLimit: 100 });
+const shared = Stream.share(fileStream, { highWaterMark: 100 });
 
 // Create consumers
 const consumer1 = shared.pull();
@@ -564,16 +564,6 @@ interface Shareable {
 }
 ```
 
-**Static Methods:**
-```typescript
-// Get or create from Broadcastable or Streamable
-Broadcast.from(input, options?): BroadcastResult
-
-// Get or create from Shareable or Streamable
-Share.from(input, options?): Share
-SyncShare.fromSync(input, options?): SyncShare
-```
-
 ---
 
 ## 11. WebIDL Definitions
@@ -584,7 +574,7 @@ The following WebIDL definitions describe the new streams API for potential stan
 
 ```webidl
 // Backpressure policy enumeration
-enum BackpressurePolicy { "strict", "drop-oldest", "drop-newest" };
+enum BackpressurePolicy { "strict", "block", "drop-oldest", "drop-newest" };
 
 // Byte chunk type - the fundamental unit of data
 typedef Uint8Array ByteChunk;
@@ -629,8 +619,8 @@ interface Writer {
 interface SyncWriter {
   readonly attribute long? desiredSize;
 
-  undefined write(WritableChunk chunk);
-  undefined writev(sequence<WritableChunk> chunks);
+  boolean write(WritableChunk chunk);
+  boolean writev(sequence<WritableChunk> chunks);
   unsigned long long end();
   undefined fail(optional any reason);
 };
@@ -640,7 +630,7 @@ interface SyncWriter {
 
 ```webidl
 dictionary PushStreamOptions {
-  unsigned long highWaterMark = 1;
+  unsigned long highWaterMark = 4;
   BackpressurePolicy backpressure = "strict";
   AbortSignal signal;
 };
@@ -668,14 +658,14 @@ interface SyncReadableByteStream {
 
 ```webidl
 // Options passed to transform functions by the pipeline
-dictionary TransformOptions {
+dictionary TransformCallbackOptions {
   required AbortSignal signal;
 };
 
 // Transform function signature (TypeScript-style for clarity)
-// transform: (chunks: Uint8Array[] | null, options: TransformOptions) => TransformResult
-callback TransformFunction = any (ChunkBatch? chunks, TransformOptions options);
-callback StatefulTransformFunction = any (AsyncIterable source, TransformOptions options);
+// transform: (chunks: Uint8Array[] | null, options: TransformCallbackOptions) => TransformResult
+callback TransformFunction = any (ChunkBatch? chunks, TransformCallbackOptions options);
+callback StatefulTransformFunction = any (AsyncIterable source, TransformCallbackOptions options);
 
 // TransformObject is always stateful (receives entire source as async iterable)
 // Using an object vs a plain function indicates stateful transform
@@ -695,13 +685,13 @@ dictionary PullOptions {
   AbortSignal signal;
 };
 
-dictionary WriteToOptions {
+dictionary PipeToOptions {
   AbortSignal signal;
   boolean preventClose = false;
   boolean preventFail = false;
 };
 
-dictionary WriteToSyncOptions {
+dictionary PipeToSyncOptions {
   boolean preventClose = false;
   boolean preventFail = false;
 };
@@ -715,11 +705,11 @@ dictionary ConsumeSyncOptions {
   unsigned long long limit;
 };
 
-dictionary TextOptions : ConsumeOptions {
+dictionary TextConsumeOptions : ConsumeOptions {
   DOMString encoding = "utf-8";
 };
 
-dictionary TextSyncOptions : ConsumeSyncOptions {
+dictionary TextConsumeSyncOptions : ConsumeSyncOptions {
   DOMString encoding = "utf-8";
 };
 
@@ -732,7 +722,7 @@ dictionary MergeOptions {
 
 ```webidl
 dictionary BroadcastOptions {
-  unsigned long bufferLimit = 16;
+  unsigned long highWaterMark = 16;
   BackpressurePolicy backpressure = "strict";
   AbortSignal signal;
 };
@@ -759,13 +749,13 @@ interface BroadcastResult {
 
 ```webidl
 dictionary ShareOptions {
-  unsigned long bufferLimit = 16;
+  unsigned long highWaterMark = 16;
   BackpressurePolicy backpressure = "strict";
   AbortSignal signal;
 };
 
 dictionary ShareSyncOptions {
-  unsigned long bufferLimit = 16;
+  unsigned long highWaterMark = 16;
   BackpressurePolicy backpressure = "strict";
 };
 
@@ -823,12 +813,12 @@ namespace Stream {
 
   // Async consumers
   Promise<Uint8Array> bytes(object source, optional ConsumeOptions options = {});
-  Promise<USVString> text(object source, optional TextOptions options = {});
+  Promise<USVString> text(object source, optional TextConsumeOptions options = {});
   Promise<ArrayBuffer> arrayBuffer(object source, optional ConsumeOptions options = {});
 
   // Sync consumers
   Uint8Array bytesSync(object source, optional ConsumeSyncOptions options = {});
-  USVString textSync(object source, optional TextSyncOptions options = {});
+  USVString textSync(object source, optional TextConsumeSyncOptions options = {});
   ArrayBuffer arrayBufferSync(object source, optional ConsumeSyncOptions options = {});
 
   // Combining
@@ -868,25 +858,7 @@ partial namespace Stream {
 
 ### Static Factory Methods
 
-```webidl
-// Broadcast.from() - get or create from Broadcastable or Streamable
-[Exposed=*]
-namespace Broadcast {
-  BroadcastResult from(object input, optional BroadcastOptions options = {});
-};
 
-// Share.from() - get or create from Shareable or Streamable
-[Exposed=*]
-namespace Share {
-  Share from(object input, optional ShareOptions options = {});
-};
-
-// SyncShare.fromSync() - get or create from SyncShareable or SyncStreamable
-[Exposed=*]
-namespace SyncShare {
-  SyncShare fromSync(object input, optional ShareSyncOptions options = {});
-};
-```
 
 ### Notes on WebIDL Representation
 

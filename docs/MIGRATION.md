@@ -491,9 +491,6 @@ const transform = {
     if (chunks === null) return null;
     return chunks.map(process);
   },
-  abort(reason) {
-    cleanup(reason);
-  }
 };
 
 const result = Stream.pull(source, transform);
@@ -642,12 +639,12 @@ const processed2 = shared.pull(transform2);
 ```javascript
 // Configure buffer for slow consumers
 const shared = Stream.share(source, {
-  bufferLimit: 100,
+  highWaterMark: 100,
   backpressure: 'drop-oldest'  // or 'strict', 'block', 'drop-newest'
 });
 
 const { writer, broadcast } = Stream.broadcast({
-  bufferLimit: 100,
+  highWaterMark: 100,
   backpressure: 'block'  // Wait for space (use 'strict' to reject)
 });
 ```

@@ -138,7 +138,7 @@ function push(
 Returns a [Writer](#writer-interface) and an async iterable readable.
 
 **Options:**
-- `highWaterMark?: number` - Max pending writes before backpressure (default: 4)
+- `highWaterMark?: number` - Buffer capacity in slots (default: 4)
 - `backpressure?:` [BackpressurePolicy](#backpressure-policy) - Policy when buffer full (default: 'strict')
 - `signal?: AbortSignal` - Cancellation signal
 
@@ -182,50 +182,76 @@ async as it is waiting for data to be written via the writer.
 
 ### Writer Interface
 
+The `Writer` interface is the API for producing data. It is an interface, not
+a concrete class; any object conforming to this interface can serve as a writer.
+
+Implementations should support `Symbol.asyncDispose` (calling `fail()` with no
+argument), enabling `await using` syntax. Implementations may also support
+`Symbol.dispose` for synchronous cleanup.
+
 ```typescript
 interface WriteOptions {
   readonly signal?: AbortSignal;
 }
 
 interface Writer {
-  readonly desiredSize: number | null;  // Slots available (>= 0 or null)
+  readonly desiredSize: number | null;
 
-  write(chunk: Uint8Array | string, options?: WriteOptions): Promise<void>;
-  writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<void>;
-  end(options?: WriteOptions): Promise<number>;
-  fail(reason?: Error): Promise<void>;
+  write(chunk: Uint8Array | string, options?: WriteOptions): Promise<undefined>;
+  writev(chunks: (Uint8Array | string)[], options?: WriteOptions): Promise<undefined>;
+  end(options?: WriteOptions): Promise<number>;  // Total bytes written
+  fail(reason?: any): Promise<undefined>;
 
-  // Synchronous variants: writeSync/writevSync/failSync return boolean;
-  // endSync returns byte count (>= 0) on success, -1 on failure.
+  // Synchronous variants (see try-fallback pattern below)
   writeSync(chunk: Uint8Array | string): boolean;
   writevSync(chunks: (Uint8Array | string)[]): boolean;
   endSync(): number;  // >= 0: total bytes written, -1: cannot end synchronously
-  failSync(reason?: Error): boolean;
+  failSync(reason?: any): boolean;
 }
 ```
 
 **Method details:**
 
-- `desiredSize`: Number of write slots available before backpressure. Returns
-  `null` if the writer is closed or errored.
+- `desiredSize`: Available slots in the internal buffer (`highWaterMark` minus
+  occupied slots), always >= 0 or `null` (closed/errored). This reflects the
+  slots buffer only; it does not account for writes in the pending writes queue.
+  A value of 0 means the buffer is full regardless of how many writes are
+  queued behind it.
 
-- `write(chunk)`: Write a single chunk. Resolves when the chunk is accepted
-  (which may wait for buffer space with strict backpressure).
+- `write(chunk)`: Write a single chunk. Strings are UTF-8 encoded. Behavior
+  when the buffer is full depends on the backpressure policy:
+  - `"strict"`: If pending writes queue has room, waits for buffer space. If
+    queue is also at capacity, rejects with `RangeError`.
+  - `"block"`: Waits for buffer space (pending queue is unbounded).
+  - `"drop-oldest"`: Discards oldest buffered batch, enqueues new data.
+  - `"drop-newest"`: Silently discards the new data.
 
-- `writev(chunks)`: Write multiple chunks atomically as a single batch. More
-  efficient than multiple `write()` calls.
+- `writev(chunks)`: Write multiple chunks as a single atomic batch. All-or-nothing:
+  either all chunks are accepted or the entire write is rejected. The batch
+  occupies a single slot for backpressure purposes.
 
-- `end()`: Signal end of data. Returns total bytes written. No more writes
-  accepted after calling.
+- `end()`: Signal end of data. Returns total bytes written. Rejects with
+  `TypeError` if already closed or errored.
 
-- `fail(reason)`: Put the writer into an error state. Notifies consumers of failure.
+- `fail(reason)`: Put the writer into an error state. Accepts any value as the
+  reason (not limited to `Error`). No-op if already closed or errored.
 
-The `writeSync`/`writevSync`/`failSync` methods return a boolean indicating if
-the action was accepted (`true`) or rejected (`false`). The `endSync` method
-returns the total bytes written (>= 0) on success, or `-1` if the writer is
-not in a state where it can be ended synchronously. These are intended for
-high-performance scenarios, used in conjunction with `write`/`writev`/`end`/`fail`
-for mixed sync/async:
+**Sync variants and the try-fallback pattern:**
+
+The sync methods are designed for a try-fallback pattern: attempt the sync
+method first, and if it fails, fall back to the async version. The sync methods
+never throw on backpressure; they return a failure indicator.
+
+The `writeSync`/`writevSync` behavior depends on the backpressure policy:
+- `"strict"`: Returns `false` when buffer is full.
+- `"block"`: Enqueues the data and returns `false` as a backpressure signal
+  (the data IS accepted, but the caller should slow down).
+- `"drop-oldest"`: Discards oldest batch, enqueues new data, returns `true`.
+- `"drop-newest"`: Silently discards new data, returns `true`.
+
+The `endSync` method returns total bytes written (>= 0) on success, or -1
+if it cannot end synchronously. The `failSync` method returns `true` on
+success or `false` if the writer cannot transition.
 
 ```js
 // Attempt to write synchronously first
@@ -239,6 +265,34 @@ if (writer.endSync() < 0) {
   await writer.end();
 }
 ```
+
+### SyncWriter Interface
+
+The `SyncWriter` interface is a synchronous interface for producing data, used
+by `Stream.pipeToSync()`. Like `Writer`, it is an interface, not a concrete
+class. Implementations should support `Symbol.dispose` (calling `fail()` with
+no argument), enabling `using` syntax.
+
+```typescript
+interface SyncWriter {
+  readonly desiredSize: number | null;
+
+  write(chunk: Uint8Array | string): boolean;
+  writev(chunks: (Uint8Array | string)[]): boolean;
+  end(): number;  // Total bytes written; throws on failure
+  fail(reason?: any): void;
+}
+```
+
+`SyncWriter` follows the same backpressure policies as `Writer`:
+- `"block"`: `write()`/`writev()` enqueue and return `true` when buffer has
+  space, or enqueue and return `false` when full (backpressure signal; data IS
+  accepted).
+- `"strict"`: Writes exceeding buffer capacity throw a `RangeError`.
+- `"drop-oldest"`/`"drop-newest"`: Behave as with `Writer`. Writes never fail.
+- `end()` throws `TypeError` if already closed or errored (no -1 fallback;
+  there is no async counterpart to fall back to).
+- `fail()` transitions to error state; no-op if already closed or errored.
 
 The `WriteOptions.signal` allows per-operation cancellation. A cancelled write
 is removed from the queue without putting the writer into an error state -
@@ -289,11 +343,10 @@ function duplex(options?: DuplexOptions): [DuplexChannel, DuplexChannel]
 
 **DuplexChannel Interface:**
 ```typescript
-interface DuplexChannel extends WriterIterablePair, AsyncDisposable {
+interface DuplexChannel {
   readonly writer: Writer;                    // Write to the remote peer
   readonly readable: AsyncIterable<Uint8Array[]>;  // Read from the remote peer
-  close(): Promise<void>;                     // Close this end (idempotent)
-  [Symbol.asyncDispose](): Promise<void>;     // Async dispose support
+  close(): Promise<undefined>;               // Close this end (idempotent)
 }
 ```
 
@@ -383,9 +436,11 @@ function wrapWebSocket(ws: WebSocket): DuplexChannel {
 }
 ```
 
-The key requirement is conforming to the `DuplexChannel` interface, which extends
-`WriterIterablePair` (providing `writer` and `readable`) and `AsyncDisposable`
-(providing `Symbol.asyncDispose` for `await using` support).
+`DuplexChannel` is an interface, not a concrete class. Any object conforming to
+this interface can serve as a duplex channel. Implementations should support
+`Symbol.asyncDispose` for `await using` support. Calling `close()` ends the
+writer (signaling end-of-stream to the peer) and stops iteration of the
+readable. It is idempotent.
 
 ---
 
@@ -408,11 +463,19 @@ function from(
 ): AsyncIterable<Uint8Array[]>
 ```
 
-**Supported inputs:**
+Throws `TypeError` if input is `null` or `undefined`.
+
+**Supported inputs (in precedence order):**
 - `string` - UTF-8 encoded
 - `ArrayBuffer` - Wrapped as Uint8Array (zero-copy)
 - `ArrayBufferView` - Converted to Uint8Array (zero-copy)
-- `Iterable` / `AsyncIterable` - Normalized and wrapped
+- Objects with `Symbol.for('Stream.toAsyncStreamable')` - Called and result recursively normalized
+- Objects with `Symbol.for('Stream.toStreamable')` - Called and result recursively normalized
+- Objects with `Symbol.asyncIterator` - Pulled and each value normalized to `Uint8Array[]` batches
+- Objects with `Symbol.iterator` - Treated as async source and normalized
+
+Implementations must guard against infinite recursion from protocol methods (e.g., an object
+whose `toStreamable` returns itself).
 
 **Example:**
 ```typescript
@@ -424,9 +487,12 @@ const readable = Stream.from(asyncGenerator());
 
 ### `Stream.fromSync(input)`
 
-Create a sync iterable from various sources. Like `from()`, this normalizes
-inputs to the consistent `Uint8Array[]` batch format, handling type conversions,
-recursive flattening, and [protocol handling](#tostreamable--toasyncstreamable)—but for synchronous sources only.
+Create a sync iterable from various sources. Throws `TypeError` if input is
+`null` or `undefined`. Like `from()`, this normalizes inputs to the consistent
+`Uint8Array[]` batch format, handling type conversions, recursive flattening,
+and [protocol handling](#tostreamable--toasyncstreamable), but for synchronous
+sources only. Async inputs (objects with `Symbol.asyncIterator` or
+`Symbol.for('Stream.toAsyncStreamable')`) cause a `TypeError`.
 
 ```typescript
 function fromSync(
@@ -445,10 +511,10 @@ flows until the consumer iterates. Each iteration pulls data through the
 transform chain on demand. Transforms receive a `null` flush signal after all
 source data has been consumed, allowing them to emit any buffered final output.
 
-When aborted via signal, on error, or when the consumer stops iterating,
-transforms are notified via the `AbortSignal` in their `TransformOptions`
-parameter. Transforms can use the signal to clean up resources, cancel
-sub-operations, or bail out of long-running work.
+The pipeline always creates an internal `AbortController` whose signal is passed
+to transforms via `TransformCallbackOptions`. If an external signal is provided,
+the internal signal follows it. When aborted, on error, or when the consumer
+stops iterating, the internal controller is aborted, notifying all transforms.
 
 ```typescript
 function pull(
@@ -483,8 +549,10 @@ for await (const chunks of output) {
 
 ### `Stream.pullSync(source, ...transforms)`
 
-Sync pull pipeline. Works identically to `pull()` but for synchronous sources
-and transforms.
+Sync pull pipeline. Works like `pull()` but for synchronous sources and
+transforms. Does not accept an options dictionary (there is no cancellation
+signal for synchronous pipelines). All arguments after `source` must be sync
+transforms.
 
 ```typescript
 function pullSync(
@@ -507,33 +575,44 @@ or an object:
   compression, encryption, or any transform needing to buffer across chunks.
 
 ```typescript
-// Options passed to transform functions by the pipeline
-interface TransformOptions {
-  /** Signal that fires when the pipeline is cancelled, errors, or
-   *  the consumer stops iteration. */
+// Options passed to async transform functions by the pipeline.
+// The pipeline always creates an internal AbortController whose signal
+// is passed here. If an external signal was provided, the internal
+// signal follows it.
+interface TransformCallbackOptions {
   readonly signal: AbortSignal;
 }
 
-// Stateless transform - receives batch and pipeline options, returns batch
+// Async stateless transform
 type TransformFn = (
   chunks: Uint8Array[] | null,
-  options: TransformOptions
-) => AsyncTransformResult;
+  options: TransformCallbackOptions
+) => any;  // Flexible return; see "Transform Return Types" below
 
-// Stateful transform - generator wrapping source, receives pipeline options
+// Async stateful transform
 type StatefulTransformFn = (
   source: AsyncIterable<Uint8Array[] | null>,
-  options: TransformOptions
-) => AsyncIterable<TransformYield>;
+  options: TransformCallbackOptions
+) => AsyncIterable<any>;
+
+// Sync stateless transform (no options parameter; no cancellation signal)
+type SyncTransformFn = (
+  chunks: Uint8Array[] | null
+) => any;
+
+// Sync stateful transform (no options parameter)
+type SyncStatefulTransformFn = (
+  source: Iterable<Uint8Array[] | null>
+) => Iterable<any>;
 
 // Transform object for stateful transforms
-// Using an object (vs a plain function) indicates this is a stateful transform
 interface TransformObject {
-  transform: StatefulTransformFn;
+  transform: StatefulTransformFn | SyncStatefulTransformFn;
 }
 
 // Function = stateless, Object = stateful
 type Transform = TransformFn | TransformObject;
+type SyncTransform = SyncTransformFn | TransformObject;
 ```
 
 **Transform Return Types:**
@@ -602,7 +681,7 @@ Returns the total number of bytes written to the writer.
 
 ```typescript
 function pipeTo(
-  source: AsyncIterable<Uint8Array[]> | Iterable<Uint8Array[]>,
+  source: any,  // Any input Stream.from() can normalize
   ...args: [...Transform[], Writer, PipeToOptions?]
 ): Promise<number>  // Total bytes written
 ```
@@ -640,7 +719,7 @@ Sync pipe to destination.
 
 ```typescript
 function pipeToSync(
-  source: Iterable<Uint8Array[]>,
+  source: any,  // Any input Stream.fromSync() can normalize
   ...args: [...SyncTransform[], SyncWriter, PipeToSyncOptions?]
 ): number
 ```
@@ -660,7 +739,7 @@ concatenates all chunks, avoiding unnecessary copies when possible.
 
 ```typescript
 function bytes(
-  source: AsyncIterable<Uint8Array[]> | Iterable<Uint8Array[]>,
+  source: any,  // Any input Stream.from() can normalize
   options?: ConsumeOptions
 ): Promise<Uint8Array>
 ```
@@ -676,15 +755,17 @@ throwing on invalid byte sequences.
 
 ```typescript
 function text(
-  source: AsyncIterable<Uint8Array[]> | Iterable<Uint8Array[]>,
-  options?: TextOptions
+  source: any,  // Any input Stream.from() can normalize
+  options?: TextConsumeOptions
 ): Promise<string>
 ```
 
-**Options:**
+**Options** (`TextConsumeOptions`):
 - `signal?: AbortSignal` - Cancellation signal
 - `limit?: number` - Max bytes (throws `RangeError` if exceeded)
-- `encoding?: string` - Text encoding (default: 'utf-8')
+- `encoding?: string` - Text encoding (default: `'utf-8'`). Only `'utf-8'` is
+  required for conformance; implementations may support additional encodings as
+  defined by the Encoding Standard. Unsupported encodings throw `RangeError`.
 
 ### `Stream.arrayBuffer(source, options?)`
 
@@ -693,7 +774,7 @@ or copies when the Uint8Array is a view of a larger buffer.
 
 ```typescript
 function arrayBuffer(
-  source: AsyncIterable<Uint8Array[]> | Iterable<Uint8Array[]>,
+  source: any,  // Any input Stream.from() can normalize
   options?: ConsumeOptions
 ): Promise<ArrayBuffer>
 ```
@@ -707,7 +788,7 @@ while still collecting them all.
 
 ```typescript
 function array(
-  source: AsyncIterable<Uint8Array[]> | Iterable<Uint8Array[]>,
+  source: any,  // Any input Stream.from() can normalize
   options?: ConsumeOptions
 ): Promise<Uint8Array[]>
 ```
@@ -734,13 +815,18 @@ for (const chunk of chunks) {
 
 ### Sync Variants
 
-Synchronous versions for use with sync sources. Same behavior as async versions.
+Synchronous versions for use with sync sources. Same algorithms as async
+versions, but normalize via `Stream.fromSync()` instead of `Stream.from()`.
+
+Sync consumers use `ConsumeSyncOptions` (with `limit` only, no `signal`) and
+`TextConsumeSyncOptions` (with `limit` and `encoding`, no `signal`), since
+there is no async cancellation in synchronous code.
 
 ```typescript
-Stream.bytesSync(source, options?)
-Stream.textSync(source, options?)
-Stream.arrayBufferSync(source, options?)
-Stream.arraySync(source, options?)
+Stream.bytesSync(source, options?: ConsumeSyncOptions)
+Stream.textSync(source, options?: TextConsumeSyncOptions)
+Stream.arrayBufferSync(source, options?: ConsumeSyncOptions)
+Stream.arraySync(source, options?: ConsumeSyncOptions)
 ```
 
 ---
@@ -759,15 +845,18 @@ The intended use case is for logging, metrics, or side-effects based on the data
 without altering the stream itself.
 
 ```typescript
-function tap(callback: TapCallbackAsync): Transform
-function tapSync(callback: TapCallback): SyncTransform
+function tap(callback: TapCallbackAsync): StatelessTransformFn
+function tapSync(callback: TapCallback): SyncStatelessTransformFn
 
 type TapCallback = (chunks: Uint8Array[] | null) => void;
 type TapCallbackAsync = (
   chunks: Uint8Array[] | null,
-  options: TransformOptions
+  options: TransformCallbackOptions
 ) => void | Promise<void>;
 ```
+
+If the callback throws (or returns a rejected promise for async callbacks),
+the error propagates to the consumer and the pipeline is torn down.
 
 **Example:**
 ```typescript
@@ -800,17 +889,21 @@ const output = Stream.pull(
 
 ### `Stream.merge(...sources, options?)`
 
-Merge multiple async sources by temporal order (whichever produces a value
-first gets yielded first). All sources are consumed concurrently using
-`Promise.race()`. When the merged stream is closed or cancelled, all source
-iterators are properly cleaned up via their `return()` method.
+Interleave multiple async sources into a single async iterable, yielding
+batches in the order they become available. All data from all sources is
+preserved; no batches are discarded. Each source has at most one pending
+`.next()` call at a time. When multiple sources settle between consumer
+pulls, their batches are queued and drained in settlement order.
 
-This is useful for combining multiple independent data feeds into a single
-stream while preserving arrival order.
+This is not `Promise.race` semantics where "losing" values are discarded.
+Every batch from every source is yielded exactly once.
+
+When the merged stream is closed or cancelled, all source iterators are
+cleaned up via `.return()`.
 
 ```typescript
 function merge(
-  ...args: [...AsyncIterable<Uint8Array[]>[], MergeOptions?]
+  ...args: [...any[], MergeOptions?]  // Sources normalized via Stream.from()
 ): AsyncIterable<Uint8Array[]>
 ```
 
@@ -916,7 +1009,9 @@ Two patterns for sharing a single source among multiple consumers:
 
 Create a push-model multi-consumer channel. Data written to the [writer](#writer-interface) is
 delivered to all consumers that have subscribed via `broadcast.push()`.
-Late-joining consumers miss data written before they subscribed.
+Data remains in the buffer and is available to consumers that attach before
+it is overwritten. Late-joining consumers begin reading from the oldest entry
+still in the buffer at the time they call `broadcast.push()`.
 
 ```typescript
 function broadcast(options?: BroadcastOptions): {
@@ -936,13 +1031,12 @@ pulling at different rates, as a very slow consumer can cause the entire broadca
 **Broadcast Interface:**
 ```typescript
 interface Broadcast {
-  push(...transforms?, options?): AsyncIterable<Uint8Array[]>;
+  push(...transforms?, options?: PullOptions): AsyncIterable<Uint8Array[]>;
   readonly consumerCount: number;
   readonly bufferSize: number;
 
-  // Cancel all consumers
-  cancel(reason?: Error): void;
-  [Symbol.dispose](): void;
+  cancel(reason?: any): void;
+  dispose(): void;  // Calls cancel(); enables Symbol.dispose protocol
 }
 ```
 
@@ -979,7 +1073,7 @@ consumers. Each consumer maintains its own cursor position in the buffer.
 
 ```typescript
 function share(
-  source: AsyncIterable<Uint8Array[]> | Iterable<Uint8Array[]>,
+  source: any,  // Any input Stream.from() can normalize
   options?: ShareOptions
 ): Share
 ```
@@ -992,11 +1086,11 @@ function share(
 **Share Interface:**
 ```typescript
 interface Share {
-  pull(...transforms?, options?): AsyncIterable<Uint8Array[]>;
+  pull(...transforms?, options?: PullOptions): AsyncIterable<Uint8Array[]>;
   readonly consumerCount: number;
   readonly bufferSize: number;
-  cancel(reason?: Error): void;
-  [Symbol.dispose](): void;
+  cancel(reason?: any): void;
+  dispose(): void;  // Calls cancel(); enables Symbol.dispose protocol
 }
 ```
 
@@ -1023,23 +1117,10 @@ Sync pull-model multi-consumer wrapper.
 `
 ```typescript
 function shareSync(
-  source: Iterable<Uint8Array[]>,
+  source: any,  // Any input Stream.fromSync() can normalize
   options?: ShareSyncOptions
 ): SyncShare
 ```
-
-### Static Namespaces
-
-```typescript
-// Get or create from Broadcastable or Streamable
-Broadcast.from(input, options?): { writer, broadcast }
-
-// Get or create from Shareable or Streamable
-Share.from(input, options?): Share
-SyncShare.fromSync(input, options?): SyncShare
-```
-
-See [Broadcastable / Shareable](#broadcastable--shareable) for implementing custom multi-consumer sources.
 
 ---
 
@@ -1106,10 +1187,9 @@ buffering system. Think of it like a bucket (slots) being filled through a hose
 
 When both the slots and pending writes are full, backpressure is signaled.
 
-> **Note:** `highWaterMark` is clamped to a minimum of 1. Passing 0 (or negative
-> values) is treated as 1. With `highWaterMark: 0`, strict mode would reject
-> every write and block mode would deadlock, so the clamp prevents these
-> degenerate cases.
+> **Note:** `highWaterMark` is clamped to a minimum of 1. Implementations may
+> also apply a reasonable upper limit; the specific maximum is
+> implementation-defined but must be at least 1024.
 
 **The Two Buffers:**
 
@@ -1292,19 +1372,18 @@ type Streamable = SyncStreamable | AsyncStreamable;
 
 ## Protocol Symbols
 
-For custom implementations that want to participate in streaming. These symbols
-enable objects to integrate with [Stream.from()](#streamfrominput),
-[Stream.share()](#streamsharesource-options), and other stream functions:
+Protocol symbols allow user-defined objects to participate in the streaming API.
+All symbols are created via `Symbol.for()`, so third-party code can implement
+these protocols without importing anything:
 
 ```typescript
-import {
-  toStreamable,        // Symbol for ToStreamable protocol
-  toAsyncStreamable,   // Symbol for ToAsyncStreamable protocol
-  broadcastProtocol,   // Symbol for Broadcastable protocol
-  shareProtocol,       // Symbol for Shareable protocol
-  shareSyncProtocol,   // Symbol for SyncShareable protocol
-  drainableProtocol,   // Symbol for Drainable protocol
-} from 'new-streams';
+// These are well-known symbols, not imports
+Symbol.for('Stream.toStreamable')
+Symbol.for('Stream.toAsyncStreamable')
+Symbol.for('Stream.broadcastProtocol')
+Symbol.for('Stream.shareProtocol')
+Symbol.for('Stream.shareSyncProtocol')
+Symbol.for('Stream.drainableProtocol')
 ```
 
 ### ToStreamable / ToAsyncStreamable
@@ -1315,20 +1394,22 @@ Allow objects to convert themselves to streamable data.
 class JsonMessage {
   constructor(private data: object) {}
 
-  [toStreamable]() {
+  [Symbol.for('Stream.toStreamable')]() {
     return JSON.stringify(this.data);
   }
 }
 
-// toStreamable is used by Stream.from() and transforms to normalize inputs.
-// It is not used by writer.write() which only accepts Uint8Array | string.
+// Used by Stream.from() and transforms to normalize inputs.
+// Not used by writer.write() which only accepts Uint8Array | string.
 const readable = Stream.from(new JsonMessage({ hello: "world" }));
 const text = await Stream.text(readable);
 // text === '{"hello":"world"}'
 ```
 
 The return value of `toStreamable` can be any supported input type (string,
-ArrayBuffer, iterable, etc). For async conversions, implement `toAsyncStreamable`.
+ArrayBuffer, iterable, etc). For async conversions, implement
+`toAsyncStreamable`. When both are present on an object, async paths
+prefer `toAsyncStreamable`.
 
 ### Broadcastable / Shareable
 
@@ -1336,13 +1417,13 @@ Allow objects to provide optimized multi-consumer implementations:
 
 ```typescript
 class OptimizedSource {
-  [shareProtocol](options?: ShareOptions): Share {
+  [Symbol.for('Stream.shareProtocol')](options?: ShareOptions): Share {
     return new OptimizedShare(this, options);
   }
 }
 
-// Automatically uses optimized implementation
-const shared = Share.from(new OptimizedSource());
+// Stream.share() checks for the protocol before creating its own Share
+const shared = Stream.share(new OptimizedSource());
 ```
 
 ### Drainable
@@ -1353,9 +1434,8 @@ to efficiently wait for write capacity.
 Writers from `Stream.push()` and `Stream.broadcast()` automatically implement this protocol.
 
 ```typescript
-interface Drainable {
-  [drainableProtocol](): Promise<boolean> | null;
-}
+// Any object implementing this method
+[Symbol.for('Stream.drainableProtocol')](): Promise<boolean> | null;
 ```
 
 The method returns:
@@ -1367,13 +1447,13 @@ The method returns:
 **Custom implementation example:**
 
 ```typescript
-class CustomWriter implements Writer, Drainable {
+class CustomWriter {
   private drainPromises: Array<{
     resolve: (v: boolean) => void;
     reject: (e: Error) => void;
   }> = [];
 
-  [drainableProtocol](): Promise<boolean> | null {
+  [Symbol.for('Stream.drainableProtocol')](): Promise<boolean> | null {
     if (this.desiredSize === null) return null;
     if (this.desiredSize > 0) return Promise.resolve(true);
 

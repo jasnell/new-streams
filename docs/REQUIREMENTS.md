@@ -47,7 +47,7 @@ Creates a bonded writer and async iterable pair for push-based streaming.
 |----|-------------|--------|
 | PUSH-030 | Default highWaterMark is 4 | ✅ |
 | PUSH-031 | Custom highWaterMark is respected | ✅ |
-| PUSH-032 | Infinity highWaterMark allows unbounded buffering | ✅ |
+| PUSH-032 | highWaterMark is clamped to [1, implementation-defined max (>= 1024)] | ✅ |
 | PUSH-033 | writev counts as single slot for backpressure | ✅ |
 
 ### 1.4 Backpressure Policies
@@ -91,7 +91,7 @@ Creates a bonded writer and async iterable pair for push-based streaming.
 |----|-------------|--------|
 | PUSH-080 | Handles empty writes | ✅ |
 | PUSH-081 | Reading from already-closed stream returns done | ✅ |
-| PUSH-082 | Multiple end() calls are idempotent | ✅ |
+| PUSH-082 | Second end() call rejects with TypeError | ✅ |
 | PUSH-083 | Batches synchronously available chunks | ✅ |
 | PUSH-084 | Handles concurrent writes and reads | ✅ |
 
@@ -383,14 +383,7 @@ Push-model multi-consumer streaming.
 | BCAST-050 | Respects already-aborted signal | ✅ |
 | BCAST-051 | Cancels on signal abort | ✅ |
 
-### 6.7 Broadcast.from()
-
-| ID | Requirement | Status |
-|----|-------------|--------|
-| BCAST-060 | Creates broadcast from async iterable | ✅ |
-| BCAST-061 | Creates broadcast from sync iterable | ✅ |
-
-### 6.8 Transforms
+### 6.7 Transforms
 
 | ID | Requirement | Status |
 |----|-------------|--------|
@@ -466,15 +459,7 @@ Pull-model multi-consumer streaming.
 |----|-------------|--------|
 | SHARE-050 | Propagates source errors to all consumers | ✅ |
 
-### 7.7 Share.from() / SyncShare.fromSync()
-
-| ID | Requirement | Status |
-|----|-------------|--------|
-| SHARE-060 | Share.from() creates share from async iterable | ✅ |
-| SHARE-061 | Share.from() creates share from sync iterable | ✅ |
-| SHARE-062 | SyncShare.fromSync() creates sync share from sync iterable | ✅ |
-
-### 7.8 Transforms
+### 7.7 Transforms
 
 | ID | Requirement | Status |
 |----|-------------|--------|

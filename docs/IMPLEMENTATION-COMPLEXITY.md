@@ -1861,7 +1861,7 @@ error/close propagation that Web Streams' `preventClose`, `preventAbort`, and
 `preventCancel` do.
 
 **AbortSignal integration:** Signals are checked at pipeline entry, threaded to every
-transform via `TransformOptions.signal`, and cleaned up in `finally` blocks.
+transform via `TransformCallbackOptions.signal`, and cleaned up in `finally` blocks.
 
 The mechanism is different �� generators + `AbortController` vs. manually constructed
 4-directional promise chains — but the error scenarios covered are comparable. New

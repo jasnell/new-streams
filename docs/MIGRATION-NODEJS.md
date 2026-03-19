@@ -469,11 +469,11 @@ class FileWriter {
     return -1;  // Can't close synchronously
   }
 
-  async abort(reason) {
+  async fail(reason) {
     await fs.promises.close(this.fd);
   }
 
-  abortSync(reason) {
+  failSync(reason) {
     return false;
   }
 }
@@ -654,9 +654,6 @@ const resourceTransform = {
       resource.release();
     }
   },
-  abort(reason) {
-    // Also called on error - clean up
-  }
 };
 
 const result = Stream.pull(source, resourceTransform);
@@ -1175,11 +1172,11 @@ const writer = {
     return new Promise(resolve => dest.end(resolve));
   },
   endSync: () => -1,
-  abort(err) {
+  fail(err) {
     dest.destroy(err);
     return Promise.resolve();
   },
-  abortSync: () => false
+  failSync: () => false
 };
 
 await Stream.pipeTo(source, transform, writer);

@@ -467,7 +467,7 @@ async function handler(req, res) {
   await Stream.pipeTo(content, {
     write(chunk) { res.write(chunk); },
     end() { res.end(); },
-    abort(err) { res.destroy(err); }
+    fail(err) { res.destroy(err); }
   });
 }
 ```
@@ -517,18 +517,25 @@ try {
 const transformWithCleanup = {
   resource: null as Resource | null,
 
-  transform(batch: Uint8Array[] | null) {
-    if (!this.resource) {
-      this.resource = acquireResource();
-    }
-    return processWithResource(batch, this.resource);
-  },
-
-  abort(error: Error) {
-    // Clean up on error
-    if (this.resource) {
-      this.resource.release();
-      this.resource = null;
+  async *transform(source: AsyncIterable<Uint8Array[] | null>,
+                   { signal }: TransformCallbackOptions) {
+    this.resource = acquireResource();
+    signal.addEventListener('abort', () => {
+      // Clean up on cancellation/error
+      if (this.resource) {
+        this.resource.release();
+        this.resource = null;
+      }
+    });
+    try {
+      for await (const batch of source) {
+        yield processWithResource(batch, this.resource);
+      }
+    } finally {
+      if (this.resource) {
+        this.resource.release();
+        this.resource = null;
+      }
     }
   }
 };
