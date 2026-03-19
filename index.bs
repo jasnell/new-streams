@@ -1,0 +1,1215 @@
+<pre class='metadata'>
+Title: Iterable Streams API
+Shortname: iterable-streams
+Group: wintertc
+Status: DRAFT
+URL: https://iterable-streams.proposal.wintertc.org/
+Repository: https://github.com/user/proposal-iterable-streams
+Editor: James M Snell, Cloudflare https://cloudflare.com/, jsnell@cloudflare.com
+Markup Shorthands: markdown yes
+No Abstract: yes
+</pre>
+<pre class=link-defaults>
+spec:dom; type:interface; text:AbortSignal
+spec:dom; type:interface; text:AbortController
+spec:dom; type:interface; text:EventTarget
+
+spec:dom; type:dfn; for:AbortSignal; text:aborted
+spec:dom; type:dfn; text:aborted flag
+spec:dom; type:dfn; text:signal abort
+spec:infra; type:dfn; for:list; text:iterate
+</pre>
+
+<h2 class="no-num" id="intro">Introduction</h2>
+
+<div class="note">
+This document is a <strong>proposal</strong> to ECMA TC55 (WinterTC). It has not been adopted as a standard and may change substantially based on committee feedback. It is published for review and discussion purposes.
+</div>
+
+This document proposes the <dfn>Iterable Streams API</dfn>, a streaming interface designed around the following principles:
+
+1.  **Streams are iterables**: An async stream is an `AsyncIterable<Uint8Array[]>`; a sync stream is an `Iterable<Uint8Array[]>`. There is no custom stream class. Consumption uses `for await...of` and `for...of`.
+
+2.  **Batched chunks**: Iterables yield `Uint8Array[]` (arrays of chunks) rather than individual chunks, amortizing the cost of each async iteration tick.
+
+3.  **Bytes only**: All streams carry {{Uint8Array}} data exclusively. Strings are automatically UTF-8 encoded.
+
+4.  **Pull-through transforms**: Transform pipelines are lazy. No data flows until the consumer pulls.
+
+5.  **Explicit backpressure**: Backpressure is controlled by a configurable [=backpressure policy=] (`"strict"`, `"block"`, `"drop-oldest"`, `"drop-newest"`).
+
+6.  **Clean sync/async separation**: Synchronous and asynchronous APIs are fully separated.
+
+7.  **Explicit multi-consumer**: Sharing a stream among multiple consumers requires explicit opt-in via [=broadcast channel=] (push model) or [=shared source=] (pull model).
+
+This specification is intended for use by [=web-interoperable runtimes=] as defined by WinterTC, though any ECMAScript-based runtime may implement it.
+
+<h2 class="no-num" id="copyright">Copyright</h2>
+
+*© 2026 Ecma International*
+
+*Permission under Ecma's copyright to copy, modify, prepare derivative works of, and distribute this work, with or without modification, for any purpose and without fee or royalty is hereby granted, provided that you include the full text of this copyright notice on ALL copies of the work or portions thereof.*
+
+*THIS WORK IS PROVIDED "AS IS," AND COPYRIGHT HOLDERS MAKE NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO, WARRANTIES OF MERCHANTABILITY OR FITNESS FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF THE DOCUMENT WILL NOT INFRINGE ANY THIRD PARTY PATENTS, COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS.*
+
+Scope {#scope}
+==============
+
+This proposal defines the [=Iterable Streams API=], a bytes-only streaming interface built on the ECMAScript iteration protocols. It specifies:
+
+*   A `Stream` namespace providing factory functions for creating, transforming, consuming, and composing byte streams.
+*   A {{Writer}} interface for push-based data production with explicit backpressure.
+*   Transform pipeline semantics based on pull-through lazy evaluation.
+*   Multi-consumer patterns for sharing a single source across multiple consumers.
+*   Bidirectional duplex channels for full-duplex communication.
+*   Protocol symbols enabling user-defined objects to participate in streaming.
+
+Conformance {#conformance}
+==========================
+
+A conforming implementation of this specification shall provide the namespace, interfaces, and functions listed herein. A conforming implementation shall also conform to [[!ECMASCRIPT]] and [[!WEBIDL]].
+
+Conforming implementations must support {{AbortSignal}} and {{AbortController}} as defined in [[!DOM]].
+
+Note: {{AbortSignal}} and {{AbortController}} are the only normative dependency this specification has on the DOM Standard. They are required because ECMAScript does not yet define a language-level cancellation protocol. Should TC39 adopt such a protocol in the future, a subsequent revision of this specification may remove the DOM dependency in favor of the language-native mechanism.
+
+Normative references {#normative-references}
+=============================================
+
+The following documents are referred to in the text in such a way that some or all of their content constitutes requirements of this document.
+
+<div data-fill-with="references"></div>
+
+Terms and definitions {#terminology}
+====================================
+
+For the purposes of this document, the terms and definitions given in [[ECMASCRIPT]], the DOM Standard [[DOM]], the Encoding Standard [[ENCODING]], and the following apply.
+
+<h3 class="no-toc" id="term-web-interoperable-runtime"><dfn>web-interoperable runtime</dfn></h3>
+
+ECMAScript-based runtime environment as defined by WinterTC
+
+<h3 class="no-toc" id="term-batched-chunks"><dfn>batched chunks</dfn></h3>
+
+an array of {{Uint8Array}} objects (`Uint8Array[]`) representing a group of byte chunks yielded as a single iteration step to amortize the cost of async iteration
+
+<h3 class="no-toc" id="term-backpressure-policy"><dfn>backpressure policy</dfn></h3>
+
+a {{BackpressurePolicy}} value controlling the behavior when an internal buffer is full
+
+<h3 class="no-toc" id="term-push-stream"><dfn>push stream</dfn></h3>
+
+a stream created by {{Stream/push()}} consisting of a bonded {{Writer}} and async iterable pair, where data written to the writer flows to the iterable
+
+<h3 class="no-toc" id="term-pull-pipeline"><dfn>pull pipeline</dfn></h3>
+
+a lazy transform chain created by {{Stream/pull()}} or {{Stream/pullSync()}} that only processes data when the consumer iterates
+
+<h3 class="no-toc" id="term-broadcast-channel"><dfn>broadcast channel</dfn></h3>
+
+a push-model multi-consumer pattern where data written to a single {{Writer}} is delivered to all subscribed consumers
+
+<h3 class="no-toc" id="term-shared-source"><dfn>shared source</dfn></h3>
+
+a pull-model multi-consumer pattern where a single source is consumed on-demand as multiple consumers pull data, with a shared buffer for slower consumers to catch up
+
+
+Core concepts {#concepts}
+=========================
+
+Streams as iterables {#concept-iterables}
+-----------------------------------------
+
+In this API, a stream is not a custom class. It is a standard ECMAScript iterable. An async byte stream conforms to the `AsyncIterable<Uint8Array[]>` protocol, and a sync byte stream conforms to the `Iterable<Uint8Array[]>` protocol. Consumers iterate streams using `for await...of` or `for...of`.
+
+Batched chunks {#concept-batched}
+---------------------------------
+
+Every iteration step yields a `Uint8Array[]` (an array of one or more chunks) rather than a single {{Uint8Array}}. This [=batched chunks|batching=] amortizes the per-tick cost of async iteration across multiple chunks.
+
+Consumers should iterate the inner array:
+
+```js
+for await (const chunks of readable) {
+  for (const chunk of chunks) {
+    // Process individual Uint8Array chunk
+  }
+}
+```
+
+Backpressure {#concept-backpressure}
+------------------------------------
+
+Backpressure is the mechanism by which a consumer signals to a producer that it should slow down. In this API, backpressure is managed through [=backpressure policies=]:
+
+*   **`"strict"`** (default): Catches producers that ignore backpressure. Properly awaited writes wait for buffer space; un-awaited writes exceeding the buffer limit cause a rejection. Both the slots buffer and pending writes queue are limited by `highWaterMark`.
+
+*   **`"block"`**: Async writes wait for buffer space. Sync writes return `false` when the buffer is full. The pending writes queue is unbounded.
+
+*   **`"drop-oldest"`**: Oldest buffered data is discarded to make room for new data. Writes never block.
+
+*   **`"drop-newest"`**: Incoming data is silently discarded when buffer is full. Writes never block.
+
+The `highWaterMark` option controls the buffer size in slots (chunk batches), not bytes. It is clamped to a minimum of 1. Implementations may also apply a reasonable upper limit; the specific maximum is implementation-defined, but must be at least 1024.
+
+Pull and push models {#concept-push-pull}
+-----------------------------------------
+
+The pull model is fundamental; the push model builds on it by bonding a {{Writer}} to a pull-based iterable.
+
+*   **Pull model**: Data flows only when the consumer iterates, pulling through any transform chain back to the source. Created via {{Stream/pull()}}, {{Stream/from()}}, and {{Stream/share()}}.
+
+*   **Push model**: A {{Writer}} bonded to a pull-based iterable, allowing a producer to write data that consumers pull via iteration. Created via {{Stream/push()}} and {{Stream/broadcast()}}.
+
+Transforms are strictly lazy in both models: no transform function executes until the consumer iterates.
+
+Try-fallback pattern {#concept-try-fallback}
+--------------------------------------------
+
+The {{Writer}} interface provides synchronous variants of its methods ({{Writer/writeSync()}}, {{Writer/writevSync()}}, {{Writer/endSync()}}, {{Writer/failSync()}}) alongside the async versions. The intended usage is a <dfn>try-fallback pattern</dfn>: attempt the synchronous method first, and if it indicates failure, fall back to the async version.
+
+For {{Writer/writeSync()}} and {{Writer/writevSync()}}, a return value of `false` indicates the synchronous attempt was not accepted. For {{Writer/endSync()}}, a return value of −1 indicates the same. In either case, the caller should fall back to the async method and `await` it:
+
+```js
+// Try sync, fall back to async
+if (!writer.writeSync(chunk)) {
+  await writer.write(chunk);
+}
+
+// End with try-fallback
+const n = writer.endSync();
+if (n < 0) {
+  await writer.end();
+}
+```
+
+This pattern enables high-performance paths where synchronous writes succeed (e.g., buffer has space), while still handling backpressure correctly when they do not. The {{Writer}} synchronous methods never throw on backpressure; they return a failure indicator, leaving the caller to decide whether to await, retry, or drop. ({{SyncWriter}} has different semantics; see [[#idl-syncwriter]].)
+
+
+Web IDL definitions {#idl}
+==========================
+
+BackpressurePolicy {#idl-backpressure}
+--------------------------------------
+
+<pre class="idl">
+enum BackpressurePolicy {
+  "strict",
+  "block",
+  "drop-oldest",
+  "drop-newest"
+};
+</pre>
+
+The {{BackpressurePolicy}} enum defines the [=backpressure policy=] options described in [[#concept-backpressure]].
+
+Stream type aliases {#idl-stream-types}
+---------------------------------------
+
+<pre class="idl">
+typedef object ByteReadableStream;
+typedef object SyncByteReadableStream;
+</pre>
+
+A {{ByteReadableStream}} is an object conforming to the `AsyncIterable<Uint8Array[]>` protocol: it has a `Symbol.asyncIterator` method that returns an async iterator yielding [=batched chunks=].
+
+A {{SyncByteReadableStream}} is an object conforming to the `Iterable<Uint8Array[]>` protocol: it has a `Symbol.iterator` method that returns an iterator yielding [=batched chunks=].
+
+These are structural types defined by the ECMAScript iteration protocols, not interfaces with a prototype chain. The `typedef object` declaration is used because Web IDL cannot directly express parameterized iterable types as values. See the [editorial note on `any` types](#idl-namespace) for further discussion.
+
+Options dictionaries {#idl-options}
+-----------------------------------
+
+<pre class="idl">
+dictionary WriteOptions {
+  AbortSignal signal;
+};
+
+dictionary PushStreamOptions {
+  unsigned long highWaterMark = 4;
+  BackpressurePolicy backpressure = "strict";
+  AbortSignal signal;
+};
+
+dictionary PullOptions {
+  AbortSignal signal;
+};
+
+dictionary PipeToOptions {
+  AbortSignal signal;
+  boolean preventClose = false;
+  boolean preventFail = false;
+};
+
+dictionary PipeToSyncOptions {
+  boolean preventClose = false;
+  boolean preventFail = false;
+};
+
+dictionary ConsumeOptions {
+  AbortSignal signal;
+  [EnforceRange] unsigned long long limit;
+};
+
+dictionary ConsumeSyncOptions {
+  [EnforceRange] unsigned long long limit;
+};
+
+dictionary TextConsumeOptions : ConsumeOptions {
+  DOMString encoding = "utf-8";
+};
+
+dictionary TextConsumeSyncOptions : ConsumeSyncOptions {
+  DOMString encoding = "utf-8";
+};
+</pre>
+
+This specification defines `"utf-8"` as the only normative value for the {{TextConsumeOptions/encoding}} and {{TextConsumeSyncOptions/encoding}} members. Implementations may support additional encodings as defined by [[ENCODING]], but only `"utf-8"` is required for conformance. If an unsupported encoding is provided, the implementation must throw a {{RangeError}}.
+
+<pre class="idl">
+
+dictionary MergeOptions {
+  AbortSignal signal;
+};
+
+dictionary BroadcastOptions {
+  unsigned long highWaterMark = 16;
+  BackpressurePolicy backpressure = "strict";
+  AbortSignal signal;
+};
+
+dictionary ShareOptions {
+  unsigned long highWaterMark = 16;
+  BackpressurePolicy backpressure = "strict";
+  AbortSignal signal;
+};
+
+dictionary ShareSyncOptions {
+  unsigned long highWaterMark = 16;
+  BackpressurePolicy backpressure = "strict";
+};
+</pre>
+
+Note: The default `highWaterMark` for {{BroadcastOptions}}, {{ShareOptions}}, and {{ShareSyncOptions}} is 16, compared to 4 for {{PushStreamOptions}} and {{DuplexOptions}}. Multi-consumer patterns benefit from a larger buffer because the slowest consumer governs backpressure, so a larger buffer provides more headroom before fast consumers are stalled by a slow one.
+
+<pre class="idl">
+dictionary DuplexDirectionOptions {
+  unsigned long highWaterMark;
+  BackpressurePolicy backpressure;
+};
+
+dictionary DuplexOptions {
+  unsigned long highWaterMark = 4;
+  BackpressurePolicy backpressure = "strict";
+  DuplexDirectionOptions a;
+  DuplexDirectionOptions b;
+  AbortSignal signal;
+};
+
+dictionary TransformCallbackOptions {
+  required AbortSignal signal;
+};
+
+callback StatelessTransformFn = any (sequence&lt;Uint8Array>? chunks, TransformCallbackOptions options);
+callback SyncStatelessTransformFn = any (sequence&lt;Uint8Array>? chunks);
+
+dictionary PushStreamResult {
+  required Writer writer;
+  required ByteReadableStream readable;
+};
+
+dictionary BroadcastResult {
+  required Writer writer;
+  required Broadcast broadcast;
+};
+</pre>
+
+The Writer interface {#idl-writer}
+----------------------------------
+
+<pre class="idl">
+interface Writer {
+  readonly attribute long? desiredSize;
+
+  Promise&lt;undefined> write((Uint8Array or USVString) chunk, optional WriteOptions options = {});
+  Promise&lt;undefined> writev(sequence&lt;(Uint8Array or USVString)> chunks, optional WriteOptions options = {});
+  boolean writeSync((Uint8Array or USVString) chunk);
+  boolean writevSync(sequence&lt;(Uint8Array or USVString)> chunks);
+
+  Promise&lt;unsigned long long> end(optional WriteOptions options = {});
+  long long endSync();
+
+  Promise&lt;undefined> fail(optional any reason);
+  boolean failSync(optional any reason);
+};
+</pre>
+
+The {{Writer}} interface is the API for producing data. See [[#writer-section]] for full semantics.
+
+Note: {{Writer}} is an interface, not a concrete class. Any object implementing this interface can serve as a writer. Implementations of {{Writer}} should support `Symbol.asyncDispose` (calling {{Writer/fail()}} with no argument), enabling `await using` syntax. Implementations may also support `Symbol.dispose` for synchronous cleanup.
+
+The SyncWriter interface {#idl-syncwriter}
+------------------------------------------
+
+<pre class="idl">
+interface SyncWriter {
+  readonly attribute long? desiredSize;
+
+  boolean write((Uint8Array or USVString) chunk);
+  boolean writev(sequence&lt;(Uint8Array or USVString)> chunks);
+  unsigned long long end();
+  undefined fail(optional any reason);
+};
+</pre>
+
+The {{SyncWriter}} interface is a synchronous interface for producing data. Like {{Writer}}, it is an interface, not a concrete class. Any object conforming to this interface can serve as a sync writer. Implementations of {{SyncWriter}} should support `Symbol.dispose` (calling {{SyncWriter/fail()}} with no argument), enabling `using` syntax.
+
+{{SyncWriter}} follows the same [=backpressure policies=] as {{Writer}} with adaptations for synchronous operation:
+
+*   With `"block"`, {{SyncWriter/write()}} and {{SyncWriter/writev()}} always enqueue the chunk(s) and return `true` when the buffer has space, or enqueue and return `false` when the buffer is full. The `false` return is a backpressure signal; the data is still accepted, but the caller should slow down.
+*   With `"strict"`, writes that exceed the buffer capacity throw a {{RangeError}}.
+*   With `"drop-oldest"` and `"drop-newest"`, writes behave as described in [[#concept-backpressure]]: the oldest or newest data is discarded respectively. Writes never fail.
+*   {{SyncWriter/end()}} throws a {{TypeError}} if the writer is already closed or errored. Unlike {{Writer/endSync()}} which returns −1 as a fallback indicator, {{SyncWriter/end()}} has no async counterpart to fall back to and throws on failure.
+*   {{SyncWriter/fail()}} transitions the writer to the errored state. If the writer is already closed or errored, it is a no-op.
+
+The Broadcast interface {#idl-broadcast}
+----------------------------------------
+
+<pre class="idl">
+interface Broadcast {
+  readonly attribute unsigned long consumerCount;
+  readonly attribute unsigned long bufferSize;
+
+  ByteReadableStream push(any... args);
+
+  undefined cancel(optional any reason);
+  undefined dispose();
+};
+</pre>
+
+The {{Broadcast}} interface is the consumer-facing side of a [=broadcast channel=]. The {{Broadcast/push()}} method accepts an optional sequence of transforms followed by an optional {{PullOptions}} dictionary, and returns a {{ByteReadableStream}}. See [[#broadcast-section]] for full semantics.
+
+Note: {{Broadcast}} is an interface, not a concrete class. Any object conforming to this interface can serve as a broadcast. {{Broadcast}} objects support the `Symbol.dispose` protocol; calling {{Broadcast/dispose()}} is equivalent to calling {{Broadcast/cancel()}} with no argument, enabling `using` declarations.
+
+The Share interface {#idl-share}
+--------------------------------
+
+<pre class="idl">
+interface Share {
+  readonly attribute unsigned long consumerCount;
+  readonly attribute unsigned long bufferSize;
+
+  ByteReadableStream pull(any... args);
+
+  undefined cancel(optional any reason);
+  undefined dispose();
+};
+</pre>
+
+The {{Share}} interface is the consumer-facing side of a [=shared source=]. The {{Share/pull()}} method accepts an optional sequence of transforms followed by an optional {{PullOptions}} dictionary, and returns an object conforming to `AsyncIterable<Uint8Array[]>`. See [[#share-section]] for full semantics.
+
+Note: {{Share}} is an interface, not a concrete class. Any object conforming to this interface can serve as a share. {{Share}} objects support the `Symbol.dispose` protocol.
+
+The SyncShare interface {#idl-syncshare}
+----------------------------------------
+
+<pre class="idl">
+interface SyncShare {
+  readonly attribute unsigned long consumerCount;
+  readonly attribute unsigned long bufferSize;
+
+  SyncByteReadableStream pull(any... args);
+
+  undefined cancel(optional any reason);
+  undefined dispose();
+};
+</pre>
+
+The {{SyncShare}} interface is the synchronous counterpart of {{Share}}. {{SyncShare/pull()}} accepts an optional sequence of sync transforms and returns an object conforming to `Iterable<Uint8Array[]>`.
+
+Note: Like {{Share}}, {{SyncShare}} is an interface, not a concrete class.
+
+The DuplexChannel interface {#idl-duplexchannel}
+-------------------------------------------------
+
+<pre class="idl">
+interface DuplexChannel {
+  readonly attribute Writer writer;
+  readonly attribute ByteReadableStream readable;
+
+  Promise&lt;undefined> close();
+};
+</pre>
+
+The {{DuplexChannel}} interface represents one end of a bidirectional communication channel. The {{DuplexChannel/readable}} attribute is an object conforming to `AsyncIterable<Uint8Array[]>`.
+
+Note: {{DuplexChannel}} is an interface, not a concrete class. Runtimes and applications may provide their own implementations (e.g., wrapping native sockets or WebSockets) as long as they conform to this interface. {{DuplexChannel}} implements `Symbol.asyncDispose`, enabling `await using` syntax for automatic cleanup.
+
+The Stream namespace {#idl-namespace}
+-------------------------------------
+
+<pre class="idl">
+[Exposed=*]
+namespace Stream {
+  /* Push stream creation */
+  PushStreamResult push(any... args);
+
+  /* Stream factories */
+  ByteReadableStream from(any input);
+  SyncByteReadableStream fromSync(any input);
+
+  /* Pull pipelines */
+  ByteReadableStream pull(any source, any... args);
+  SyncByteReadableStream pullSync(any source, any... args);
+
+  /* Pipe operations */
+  Promise&lt;unsigned long long> pipeTo(any source, any... args);
+  unsigned long long pipeToSync(any source, any... args);
+
+  /* Consumers */
+  Promise&lt;Uint8Array> bytes(any source, optional ConsumeOptions options = {});
+  Uint8Array bytesSync(any source, optional ConsumeSyncOptions options = {});
+  Promise&lt;USVString> text(any source, optional TextConsumeOptions options = {});
+  USVString textSync(any source, optional TextConsumeSyncOptions options = {});
+  Promise&lt;ArrayBuffer> arrayBuffer(any source, optional ConsumeOptions options = {});
+  ArrayBuffer arrayBufferSync(any source, optional ConsumeSyncOptions options = {});
+  Promise&lt;sequence&lt;Uint8Array>> array(any source, optional ConsumeOptions options = {});
+  sequence&lt;Uint8Array> arraySync(any source, optional ConsumeSyncOptions options = {});
+
+  /* Utilities */
+  StatelessTransformFn tap(any callback);
+  SyncStatelessTransformFn tapSync(any callback);
+  ByteReadableStream merge(any... args);
+  Promise&lt;boolean>? ondrain(any drainable);
+
+  /* Multi-consumer */
+  BroadcastResult broadcast(optional BroadcastOptions options = {});
+  Share share(any source, optional ShareOptions options = {});
+  SyncShare shareSync(any source, optional ShareSyncOptions options = {});
+
+  /* Duplex */
+  sequence&lt;DuplexChannel> duplex(optional DuplexOptions options = {});
+};
+</pre>
+
+Note: Many methods in the {{Stream}} namespace accept variadic arguments where the final argument may be an options dictionary and preceding arguments are transforms. The argument parsing for each method is described in its respective section.
+
+<div class="note">
+<p>Several methods in this specification use `any` for parameter types where more precise types would be desirable. This is a limitation of Web IDL, not of the API itself.</p>
+
+<p>Parameters typed as `any source` or `any input` accept any object that {{Stream/from()}} can normalize (iterables, strings, ArrayBuffers, or objects implementing the `toStreamable` protocol), which is not expressible as a single Web IDL type. Similarly, variadic `any... args` parameters accept a mix of transforms and options dictionaries whose parsing is described in prose.</p>
+
+<p>Return types use named types where possible: {{ByteReadableStream}} and {{SyncByteReadableStream}} for stream-returning methods, {{PushStreamResult}} and {{BroadcastResult}} for factory methods, and concrete interface types like {{Share}}, {{SyncShare}}, and {{DuplexChannel}} elsewhere. These named types are defined as `typedef object` because the ECMAScript iteration protocols are structural, and Web IDL cannot express parameterized iterable types as values. In all cases, the prose algorithm for each method defines the actual types accepted and returned.</p>
+</div>
+
+
+Push streams {#push-section}
+============================
+
+`Stream.push()` {#push-method}
+------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">push(...args)</dfn> method creates a [=push stream=], a bonded {{Writer}} and `AsyncIterable<Uint8Array[]>` pair.
+
+When called, it performs the following steps:
+
+<ol>
+<li>Let |transforms| be an empty list and |options| be an empty {{PushStreamOptions}}.
+<li>[=Parse variadic transform arguments=] from |args| into |transforms| and |options|.
+<li>Let |highWaterMark| be the result of clamping |options|["{{PushStreamOptions/highWaterMark}}"] to the range [1, implementation-defined maximum].
+<li>Let |backpressure| be |options|["{{PushStreamOptions/backpressure}}"].
+<li>Let |signal| be |options|["{{PushStreamOptions/signal}}"] if present; otherwise `undefined`.
+<li>Create an internal slots buffer with capacity |highWaterMark|.
+<li>Create a pending writes queue. If |backpressure| is `"strict"`, limit its capacity to |highWaterMark|.
+<li>Let |writer| be a new {{Writer}} backed by the internal buffer, the pending writes queue, the [=backpressure policy=] |backpressure|, and |signal| if present.
+<li>Let |pipelineController| be a new {{AbortController}}. If |signal| is not `undefined`, set |pipelineController|'s signal to follow |signal|.
+<li>Let |bufferIterable| be an async iterable that dequeues the next batch from the slots buffer on each step (waiting if empty).
+<li>Let |readable| be the result of [=compose transform pipeline=] with |bufferIterable|, |transforms|, and a {{TransformCallbackOptions}} with signal set to |pipelineController|'s signal. On return or throw (consumer stops iterating), abort |pipelineController| and signal cancellation to |writer|.
+<li>If |signal| is not `undefined` and |signal| is [=AbortSignal/aborted=], immediately put |writer| into the failed state with |signal|'s abort reason.
+<li>Return «[ "writer" → |writer|, "readable" → |readable| ]».
+</ol>
+</div>
+
+The returned `readable` is an async iterable yielding [=batched chunks=]. There is no sync variant of {{Stream/push()}} because push streams are inherently asynchronous.
+
+Note: Transforms passed to {{Stream/push()}} are applied lazily when the consumer pulls, not when the producer writes.
+
+The Writer interface {#writer-section}
+--------------------------------------
+
+A {{Writer}} provides the interface for producing data. Implementations of {{Writer}} are returned by {{Stream/push()}}, {{Stream/broadcast()}}, and {{Stream/duplex()}}, but any object conforming to this interface can serve as a writer.
+
+### `Writer.desiredSize` ### {#writer-desiredsize}
+
+<div algorithm>
+The <dfn attribute for="Writer">desiredSize</dfn> attribute, on getting, returns `null` if the writer is closed or errored. Otherwise it returns the number of available slots in the internal buffer (i.e., `highWaterMark` minus the number of occupied slots), which is always ≥ 0.
+</div>
+
+{{Writer/desiredSize}} reflects capacity in the slots buffer only; it does not account for writes waiting in the pending writes queue. When the [=backpressure policy=] is `"block"`, a {{Writer/desiredSize}} of 0 means the slots buffer is full, regardless of how many additional writes are queued in the pending writes queue behind it. It is not a measurement of total queued items.
+
+Note: Unlike the WHATWG Streams API, {{Writer/desiredSize}} is never negative. A value of 0 is the signal that the buffer is full; producers should await their writes or use {{Stream/ondrain()}} before writing more.
+
+### `Writer.write()` ### {#writer-write}
+
+<div algorithm>
+The <dfn method for="Writer">write(chunk, options)</dfn> method writes a single chunk. It performs the following steps:
+
+<ol>
+<li>If |chunk| is a {{USVString}}, set |chunk| to the result of [=UTF-8 encode|UTF-8 encoding=] |chunk|.
+<li>If the writer is closed, return [=a promise rejected with=] a {{TypeError}}.
+<li>If the writer is errored, return [=a promise rejected with=] the stored error.
+<li>If |options|["{{WriteOptions/signal}}"] is present and [=AbortSignal/aborted=], return [=a promise rejected with=] its abort reason.
+<li>Let |batch| be « |chunk| ».
+<li>If the slots buffer has space, enqueue |batch|, [=notify drain waiters=], and return [=a promise resolved with=] `undefined`.
+<li>The slots buffer is full. Proceed based on the [=backpressure policy=]:
+    <ol>
+    <li>If `"drop-oldest"`: dequeue the oldest batch, enqueue |batch|, and return [=a promise resolved with=] `undefined`.
+    <li>If `"drop-newest"`: discard |batch| and return [=a promise resolved with=] `undefined`.
+    <li>If `"strict"`: if the pending writes queue is at capacity, return [=a promise rejected with=] a {{RangeError}}. Otherwise, add the write to the pending writes queue and return a promise that resolves when the batch is transferred to the slots buffer.
+    <li>If `"block"`: add the write to the pending writes queue and return a promise that resolves when the batch is transferred to the slots buffer.
+    </ol>
+<li>If the write was added to the pending writes queue and |options|["{{WriteOptions/signal}}"] is present, register an abort handler that removes this write from the pending queue and rejects its promise. The writer remains open; subsequent writes may still succeed.
+</ol>
+</div>
+
+### `Writer.writev()` ### {#writer-writev}
+
+<div algorithm>
+The <dfn method for="Writer">writev(chunks, options)</dfn> method writes multiple chunks as a single atomic batch. The operation is all-or-nothing: either all chunks are accepted or the entire write is rejected. It performs the same steps as {{Writer/write()}} except that |batch| is the result of converting each element of |chunks| to {{Uint8Array}} (encoding strings as UTF-8). The entire batch occupies a single slot for backpressure purposes.
+</div>
+
+### `Writer.writeSync()` / `Writer.writevSync()` ### {#writer-writesync}
+
+<div algorithm>
+The <dfn method for="Writer">writeSync(chunk)</dfn> method attempts a synchronous write. It performs the following steps:
+
+<ol>
+<li>If |chunk| is a {{USVString}}, set |chunk| to the result of [=UTF-8 encode|UTF-8 encoding=] |chunk|.
+<li>If the writer is closed or errored, return `false`.
+<li>Let |batch| be « |chunk| ».
+<li>If the slots buffer has space, enqueue |batch|, [=notify drain waiters=], and return `true`.
+<li>The slots buffer is full. Proceed based on the [=backpressure policy=]:
+    <ol>
+    <li>If `"drop-oldest"`: dequeue the oldest batch, enqueue |batch|, and return `true`.
+    <li>If `"drop-newest"`: discard |batch| and return `true`.
+    <li>If `"strict"`: return `false`.
+    <li>If `"block"`: enqueue |batch| and return `false`. The data is accepted, but the `false` return signals backpressure.
+    </ol>
+</ol>
+
+A return of `false` is the signal to use the [=try-fallback pattern=] and await {{Writer/write()}}.
+</div>
+
+The <dfn method for="Writer">writevSync(chunks)</dfn> method performs the same steps but enqueues the full batch as a single slot. Like {{Writer/writev()}}, the operation is all-or-nothing: it returns `true` only if all chunks are accepted, or `false` if none are. A return of `false` is the signal to use the [=try-fallback pattern=] and await {{Writer/writev()}}.
+
+### `Writer.end()` / `Writer.endSync()` ### {#writer-end}
+
+<div algorithm>
+The <dfn method for="Writer">end(options)</dfn> method signals end-of-stream. If the writer is already closed or errored, it returns [=a promise rejected with=] a {{TypeError}}. Otherwise it transitions the writer to the closed state, enqueues an end-of-stream sentinel, and returns [=a promise resolved with=] the total number of bytes written.
+</div>
+
+<div algorithm>
+The <dfn method for="Writer">endSync()</dfn> method attempts synchronous end-of-stream. If the writer is already closed, errored, or the buffer is full, it returns −1. Otherwise it transitions the writer to the closed state, enqueues an end-of-stream sentinel, and returns the total number of bytes written (≥ 0). A return of −1 is the signal to use the [=try-fallback pattern=] and await {{Writer/end()}}.
+</div>
+
+### `Writer.fail()` / `Writer.failSync()` ### {#writer-fail}
+
+<div algorithm>
+The <dfn method for="Writer">fail(reason)</dfn> method puts the writer into a terminal error state. If the writer is already closed or errored, it returns [=a promise resolved with=] `undefined`. Otherwise it transitions the writer to the errored state with |reason|, rejects all pending write promises with |reason|, calls [=notify drain waiters=] with error |reason|, and returns [=a promise resolved with=] `undefined`.
+</div>
+
+The <dfn method for="Writer">failSync(reason)</dfn> method performs the same steps synchronously, returning `true` on success or `false` if the writer cannot transition. A return of `false` is the signal to use the [=try-fallback pattern=] and await {{Writer/fail()}}.
+
+
+Stream factories {#factories}
+=============================
+
+`Stream.from()` {#from-method}
+------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">from(input)</dfn> method creates an `AsyncIterable<Uint8Array[]>` from various input types, normalizing to the [=batched chunks=] format.
+
+<ol>
+<li>If |input| is `null` or `undefined`, throw a {{TypeError}}.
+<li>If |input| is a {{USVString}}, return an async iterable yielding a single batch containing the [=UTF-8 encode|UTF-8 encoded=] result.
+<li>If |input| is an {{ArrayBuffer}}, return an async iterable yielding a single batch containing a new {{Uint8Array}} wrapping |input| (zero-copy).
+<li>If |input| is an {{ArrayBufferView}}, return an async iterable yielding a single batch containing a {{Uint8Array}} view over the same buffer region (zero-copy).
+<li>If |input| has a method keyed by `Symbol.for('Stream.toAsyncStreamable')`, call that method and recursively normalize the result (awaiting if it returns a promise). This step takes precedence over the `toStreamable` protocol and the iteration protocols below. Implementations must guard against infinite recursion (e.g., an object whose protocol method returns itself); a {{TypeError}} should be thrown if a reasonable recursion depth is exceeded.
+<li>If |input| has a method keyed by `Symbol.for('Stream.toStreamable')`, call that method and recursively normalize the result. This step takes precedence over the iteration protocols below. The same recursion guard applies.
+<li>If |input| has a `Symbol.asyncIterator` method, return a new `AsyncIterable<Uint8Array[]>` that pulls from the resulting async iterator and normalizes each yielded value to a `Uint8Array[]` batch. Each yielded value is recursively normalized: strings are UTF-8 encoded; {{ArrayBuffer}} and {{ArrayBufferView}} values are converted to {{Uint8Array}}; arrays are flattened with each element normalized; nested iterables and async iterables are recursively consumed and flattened; objects with the `toStreamable` or `toAsyncStreamable` protocol are converted via that protocol. Values that are not convertible to {{Uint8Array}} cause a {{TypeError}}. Synchronous values encountered in sequence should be batched together into a single `Uint8Array[]` to maximize batching efficiency.
+<li>If |input| has a `Symbol.iterator` method, treat the sync iterator as an async source and normalize as in the previous step (except that nested async iterables and the `toAsyncStreamable` protocol are not supported and cause a {{TypeError}} during normalization).
+<li>Throw a {{TypeError}}.
+</ol>
+</div>
+
+Note: WHATWG `ReadableStream` objects implement `Symbol.asyncIterator` and are therefore accepted by step 6. However, `ReadableStream` yields individual chunks (not `Uint8Array[]` batches), so each chunk is normalized and wrapped into a single-element batch. No special-casing of `ReadableStream` is required or defined by this specification.
+
+`Stream.fromSync()` {#fromsync-method}
+--------------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">fromSync(input)</dfn> method creates an `Iterable<Uint8Array[]>` from synchronous input types. If |input| is `null` or `undefined`, it throws a {{TypeError}}. Otherwise it performs the same normalization as {{Stream/from()}} but only accepts synchronous inputs ({{USVString}}, {{ArrayBuffer}}, {{ArrayBufferView}}, objects with `Symbol.for('Stream.toStreamable')`, or objects with `Symbol.iterator`). Async inputs cause a {{TypeError}}.
+</div>
+
+
+Pull pipelines {#pull-section}
+==============================
+
+`Stream.pull()` {#pull-method}
+------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">pull(source, ...args)</dfn> method creates a [=pull pipeline=], a lazy transform chain.
+
+<ol>
+<li>Let |normalized| be the result of calling {{Stream/from()}} with |source|.
+<li>Let |transforms| be an empty list and |options| be an empty {{PullOptions}}.
+<li>[=Parse variadic transform arguments=] from the remaining |args| into |transforms| and |options|.
+<li>Let |signal| be |options|["{{PullOptions/signal}}"] if present; otherwise `undefined`.
+<li>If |signal| is not `undefined` and [=AbortSignal/aborted=], return an async iterable that immediately throws the abort reason.
+<li>Let |pipelineController| be a new {{AbortController}}. If |signal| is not `undefined`, set |pipelineController|'s signal to follow |signal|.
+<li>Let |transformOptions| be a {{TransformCallbackOptions}} with signal set to |pipelineController|'s signal.
+<li>Let |composed| be the result of [=compose transform pipeline=] with |normalized|, |transforms|, and |transformOptions|.
+<li>Return |composed|. On return (consumer breaks), the pipeline controller is aborted.
+</ol>
+</div>
+
+`Stream.pullSync()` {#pullsync-method}
+--------------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">pullSync(source, ...args)</dfn> method creates a synchronous [=pull pipeline=].
+
+<ol>
+<li>Let |normalized| be the result of calling {{Stream/fromSync()}} with |source|.
+<li>Let |transforms| be an empty list.
+<li>For each |arg| in the remaining |args|: if |arg| is a [=transform argument=], append it to |transforms|; otherwise throw a {{TypeError}}.
+<li>Let |composed| be the result of [=compose sync transform pipeline=] with |normalized| and |transforms|.
+<li>Return |composed|.
+</ol>
+
+Note: Unlike {{Stream/pull()}}, `pullSync` does not accept an options dictionary (there is no cancellation signal for synchronous pipelines). All arguments after |source| must be sync transforms.
+</div>
+
+Transforms {#transforms}
+-------------------------
+
+Transforms come in two forms, distinguished by whether the value is a function or an object:
+
+**Stateless transforms** are plain functions with the signature: `(chunks, options) => result` where `chunks` is `Uint8Array[] | null` and `options` is a {{TransformCallbackOptions}}. The function is called once per batch. When `chunks` is `null`, it is a <dfn>flush signal</dfn> indicating end-of-stream.
+
+**Stateful transforms** are objects with a `transform` property whose value is a function with the signature: `(source, options) => AsyncIterable` where `source` is an `AsyncIterable<Uint8Array[] | null>` and `options` is a {{TransformCallbackOptions}}. The function receives the entire upstream source and returns an async iterable of output chunks.
+
+<div algorithm>
+To determine whether an argument is a <dfn>transform argument</dfn>: if it is a function, it is a stateless transform; if it is an object with a `"transform"` property that is a function, it is a stateful transform; otherwise, it is not a transform.
+</div>
+
+Transform return values are flexible. A transform may return: `null` (no output), `Uint8Array[]` (a batch), a single {{Uint8Array}}, a {{USVString}} (UTF-8 encoded), an iterable or async iterable (flattened), or a promise (awaited, async only).
+
+<div algorithm>
+To <dfn>compose transform pipeline</dfn> given a source async iterable |source|, a list of transforms |transforms|, and a {{TransformCallbackOptions}} |options|:
+
+<ol>
+<li>Let |current| be |source|.
+<li>Let |statelessRun| be an empty list.
+<li>For each |transform| in |transforms|:
+    <ol>
+    <li>If |transform| is a stateless transform (a function), append it to |statelessRun|.
+    <li>If |transform| is a stateful transform (an object with a `"transform"` method):
+        <ol>
+        <li>If |statelessRun| is not empty, set |current| to a new async iterable that pulls from |current| and applies each function in |statelessRun| in order per batch (calling each with the current batch and |options|, [=normalize transform output|normalizing=] each result). Reset |statelessRun| to an empty list.
+        <li>Let |wrappedSource| be a new async iterable that pulls from |current| and appends a final `null` value (the [=flush signal=]) after the source is exhausted.
+        <li>Set |current| to the result of calling |transform|'s `"transform"` method with (|wrappedSource|, |options|). The returned async iterable becomes the new upstream for subsequent transforms.
+        </ol>
+    </ol>
+<li>If |statelessRun| is not empty after processing all transforms, set |current| to a new async iterable that pulls from |current| and applies each remaining function in |statelessRun| in order per batch, followed by a final pass with `null` (the [=flush signal=]) when the source is exhausted.
+<li>Return |current|.
+</ol>
+
+The result is a single composed async iterable. Each stateful transform wraps everything upstream (including any preceding stateless transforms) and becomes the source for everything downstream. This means a chain like [stateless₁, stateful₂, stateless₃, stateful₄] produces:
+
+```
+stateful₄( stateless₃( stateful₂( stateless₁( source ) ) ) )
+```
+
+where each layer only executes when the outermost consumer pulls.
+</div>
+
+<div algorithm>
+To <dfn>compose sync transform pipeline</dfn> given a source iterable |source| and a list of sync transforms |transforms|:
+
+<ol>
+<li>Let |current| be |source|.
+<li>Let |statelessRun| be an empty list.
+<li>For each |transform| in |transforms|:
+    <ol>
+    <li>If |transform| is a stateless sync transform (a function), append it to |statelessRun|.
+    <li>If |transform| is a stateful sync transform (an object with a `"transform"` method):
+        <ol>
+        <li>If |statelessRun| is not empty, set |current| to a new iterable that pulls from |current| and applies each function in |statelessRun| in order per batch, [=normalize transform output|normalizing=] each result. Reset |statelessRun| to an empty list.
+        <li>Let |wrappedSource| be a new iterable that pulls from |current| and appends a final `null` value (the [=flush signal=]) after the source is exhausted.
+        <li>Set |current| to the result of calling |transform|'s `"transform"` method with |wrappedSource|. The returned iterable becomes the new upstream.
+        </ol>
+    </ol>
+<li>If |statelessRun| is not empty, set |current| to a new iterable that applies each remaining function in order per batch, followed by a `null` [=flush signal=] when exhausted.
+<li>Return |current|.
+</ol>
+
+Note: Sync stateless transforms receive `(chunks)` with no options parameter (there is no {{TransformCallbackOptions}} for sync transforms, as there is no cancellation signal). Sync stateful transforms receive `(source)` only.
+</div>
+
+<div algorithm>
+To <dfn>normalize transform output</dfn> given |value|: if |value| is `null`, return `null`. If |value| is a {{Uint8Array}}, return « |value| ». If |value| is a {{USVString}}, return « [=UTF-8 encode|UTF-8 encoded=] |value| ». If |value| is an {{ArrayBuffer}} or {{ArrayBufferView}}, convert to {{Uint8Array}} and return as a single-element batch. If |value| is iterable, flatten to {{Uint8Array}} chunks and return. Otherwise throw a {{TypeError}}.
+</div>
+
+
+Pipe operations {#pipe-section}
+===============================
+
+`Stream.pipeTo()` {#pipeto-method}
+----------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">pipeTo(source, ...args)</dfn> method asynchronously consumes |source| and writes to a {{Writer}} destination, with optional transforms. Returns a promise resolving to the total bytes written.
+
+<ol>
+<li>Let |normalized| be the result of calling {{Stream/from()}} with |source|.
+<li>Let (|transforms|, |writer|, |options|) be the result of [=parse pipeTo arguments=] from the remaining |args| with |writerInterface| set to {{Writer}}.
+<li>Let |signal| be |options|["{{PipeToOptions/signal}}"] if present; otherwise `undefined`.
+<li>Let |preventClose| be |options|["{{PipeToOptions/preventClose}}"] and |preventFail| be |options|["{{PipeToOptions/preventFail}}"].
+<li>Let |pullOptions| be a new {{PullOptions}} with signal set to |signal| if present.
+<li>Let |pipeline| be the result of {{Stream/pull()}} with |normalized|, the extracted |transforms|, and |pullOptions|.
+<li>Let |totalBytes| be 0.
+<li>Asynchronously iterate |pipeline|. For each |batch| yielded, for each |chunk| in |batch|, add |chunk|'s byte length to |totalBytes|. Then write the batch to |writer|: if |writer| has a `writev` method, call |writer|.{{Writer/writev()}} with |batch| and «[ "signal" → |signal| ]»; otherwise call |writer|.{{Writer/write()}} for each chunk, passing |signal| in the {{WriteOptions}}.
+<li>On successful completion, if |preventClose| is `false`, call |writer|.{{Writer/end()}} with «[ "signal" → |signal| ]».
+<li>On error |e|, if |preventFail| is `false`, call |writer|.{{Writer/fail()}} with |e|. Re-throw |e|.
+<li>Return [=a promise resolved with=] |totalBytes|.
+</ol>
+</div>
+
+`Stream.pipeToSync()` {#pipetosync-method}
+------------------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">pipeToSync(source, ...args)</dfn> method is the synchronous counterpart of {{Stream/pipeTo()}}.
+
+<ol>
+<li>Let |normalized| be the result of calling {{Stream/fromSync()}} with |source|.
+<li>Let (|transforms|, |writer|, |options|) be the result of [=parse pipeTo arguments=] from the remaining |args| with |writerInterface| set to {{SyncWriter}}.
+<li>Let |preventClose| be |options|["{{PipeToSyncOptions/preventClose}}"] and |preventFail| be |options|["{{PipeToSyncOptions/preventFail}}"].
+<li>Let |pipeline| be the result of [=compose sync transform pipeline=] with |normalized| and the extracted |transforms|.
+<li>Let |totalBytes| be 0.
+<li>Synchronously iterate |pipeline|. For each |batch| yielded, for each |chunk| in |batch|, add |chunk|'s byte length to |totalBytes|. Then write the batch to |writer|: if |writer| has a `writev` method, call |writer|.{{SyncWriter/writev()}} with |batch|; otherwise call |writer|.{{SyncWriter/write()}} for each chunk.
+<li>On successful completion, if |preventClose| is `false`, call |writer|.{{SyncWriter/end()}}.
+<li>On error |e|, if |preventFail| is `false`, call |writer|.{{SyncWriter/fail()}} with |e|. Re-throw |e|.
+<li>Return |totalBytes|.
+</ol>
+</div>
+
+
+Consumers {#consumers}
+======================
+
+Consumer functions are terminal operations that collect an entire stream into memory. All consumers accept any input that {{Stream/from()}} can normalize. The optional `limit` parameter protects against unbounded memory growth; exceeding it throws a {{RangeError}}.
+
+`Stream.bytes()` / `Stream.bytesSync()` {#bytes-method}
+--------------------------------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">bytes(source, options)</dfn> method collects all bytes from |source| into a single {{Uint8Array}}.
+
+<ol>
+<li>Let |normalized| be the result of {{Stream/from()}} with |source|.
+<li>Let |signal| be |options|["{{ConsumeOptions/signal}}"] if present.
+<li>Let |limit| be |options|["{{ConsumeOptions/limit}}"] if present.
+<li>If |signal| is present and [=AbortSignal/aborted=], return [=a promise rejected with=] its abort reason.
+<li>Let |chunks| be an empty list and |totalBytes| be 0.
+<li>Asynchronously iterate |normalized|. Before each iteration step, if |signal| is present and [=AbortSignal/aborted=], stop iteration and reject with |signal|'s abort reason. For each batch yielded, for each chunk, add its byte length to |totalBytes|. If |limit| is present and |totalBytes| exceeds |limit|, throw a {{RangeError}}. Append the chunk to |chunks|.
+<li>If |chunks| is empty, return a zero-length {{Uint8Array}}.
+<li>If |chunks| has exactly one element whose buffer is not shared, return that element.
+<li>Otherwise, concatenate all chunks into a new {{Uint8Array}} and return it.
+</ol>
+</div>
+
+The <dfn method for="Stream">bytesSync(source, options)</dfn> method performs the same algorithm synchronously using {{Stream/fromSync()}} for normalization.
+
+`Stream.text()` / `Stream.textSync()` {#text-method}
+-----------------------------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">text(source, options)</dfn> method collects all bytes and decodes them as text.
+
+<ol>
+<li>Let |bytes| be the result of {{Stream/bytes()}} with |source| and a {{ConsumeOptions}} containing |options|["{{ConsumeOptions/signal}}"] and |options|["{{ConsumeOptions/limit}}"].
+<li>Let |encoding| be |options|["{{TextConsumeOptions/encoding}}"] (default `"utf-8"`).
+<li>If |encoding| is not a supported encoding, throw a {{RangeError}}. Conforming implementations must support at least `"utf-8"`.
+<li>Let |decoder| be a new {{TextDecoder}} with |encoding| and `fatal` set to `true`.
+<li>Return the result of calling |decoder|.`decode`(|bytes|).
+</ol>
+</div>
+
+Note: The `fatal: true` default means invalid byte sequences throw a {{TypeError}} rather than being silently replaced.
+
+The <dfn method for="Stream">textSync(source, options)</dfn> method performs the same algorithm synchronously.
+
+`Stream.arrayBuffer()` / `Stream.arrayBufferSync()` {#arraybuffer-method}
+--------------------------------------------------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">arrayBuffer(source, options)</dfn> method collects all bytes into an {{ArrayBuffer}}.
+
+<ol>
+<li>Let |bytes| be the result of {{Stream/bytes()}} with |source| and |options|.
+<li>If |bytes| is a view over the entire buffer (offset 0, length equals buffer length), return the buffer directly.
+<li>Otherwise return a copy of the relevant region as a new {{ArrayBuffer}}.
+</ol>
+</div>
+
+The <dfn method for="Stream">arrayBufferSync(source, options)</dfn> method performs the same algorithm synchronously.
+
+`Stream.array()` / `Stream.arraySync()` {#array-method}
+--------------------------------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">array(source, options)</dfn> method collects all chunks preserving chunk boundaries.
+
+<ol>
+<li>Let |normalized| be the result of {{Stream/from()}} with |source|.
+<li>Let |signal| be |options|["{{ConsumeOptions/signal}}"] if present.
+<li>Let |limit| be |options|["{{ConsumeOptions/limit}}"] if present.
+<li>If |signal| is present and [=AbortSignal/aborted=], return [=a promise rejected with=] its abort reason.
+<li>Let |result| be an empty list and |totalBytes| be 0.
+<li>Asynchronously iterate |normalized|. Before each iteration step, if |signal| is present and [=AbortSignal/aborted=], stop iteration and reject with |signal|'s abort reason. For each batch, for each chunk, add its byte length to |totalBytes|. If |limit| is present and |totalBytes| exceeds |limit|, throw a {{RangeError}}. Append the chunk to |result|.
+<li>Return |result| as a JavaScript Array.
+</ol>
+</div>
+
+The <dfn method for="Stream">arraySync(source, options)</dfn> method performs the same algorithm synchronously.
+
+
+Utilities {#utilities}
+=====================
+
+`Stream.tap()` / `Stream.tapSync()` {#tap-method}
+--------------------------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">tap(callback)</dfn> method creates a stateless transform that observes chunks without modifying them. The |callback| is called with each batch (or `null` for the [=flush signal=]). Its return value is ignored; the original batch is yielded unchanged. If the callback throws (or returns a rejected promise, for async callbacks), the error propagates to the consumer and the pipeline is torn down. The tap does not swallow errors. Returns a transform function suitable for use in {{Stream/pull()}} or {{Stream/push()}}.
+</div>
+
+The <dfn method for="Stream">tapSync(callback)</dfn> method creates a synchronous tap transform.
+
+Note: `tap` does not prevent the callback from mutating chunks in-place. The guarantee is only that the callback's *return value* is ignored.
+
+`Stream.merge()` {#merge-method}
+--------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">merge(...args)</dfn> method interleaves multiple async sources into a single async iterable, yielding batches in the order they become available across all sources. All data from all sources is preserved; no batches are discarded.
+
+<ol>
+<li>Let |options| be an empty {{MergeOptions}}.
+<li>If the final element of |args| is a plain object that has a {{MergeOptions/signal}} member and does not have `Symbol.asyncIterator` or `Symbol.iterator`, set |options| to that element and remove it from |args|.
+<li>Let |sources| be |args|. For each element in |sources|, normalize it via {{Stream/from()}}.
+<li>Let |signal| be |options|["{{MergeOptions/signal}}"] if present.
+<li>Create an active iterator for each source by calling `Symbol.asyncIterator` on it.
+<li>Let |ready| be an empty queue of settled batches.
+<li>Return a new `AsyncIterable<Uint8Array[]>` that, on each iteration step:
+    <ol>
+    <li>For each active iterator that does not already have a pending `.next()` promise, call `.next()` once and store the resulting promise. This ensures at most one outstanding pull per source at any time.
+    <li>If |ready| is not empty, dequeue the next batch from |ready| and yield it.
+    <li>Otherwise, wait for any one of the pending promises to settle.
+    <li>For each promise that settled with a non-done result, enqueue its value into |ready|.
+    <li>For each promise that settled with a done result, remove that iterator from the active set.
+    <li>If |ready| is not empty, dequeue the next batch from |ready| and yield it.
+    <li>When the active set is empty and |ready| is empty, the merged iterable completes.
+    <li>On cancellation (via |signal| or consumer break), call `.return()` on all active iterators and discard |ready|.
+    </ol>
+</ol>
+
+Because multiple sources produce data independently but the consumer pulls through a single iterable, some internal queueing is unavoidable. When multiple sources settle between consumer pulls, their batches accumulate in |ready| and are drained in settlement order on subsequent pulls. However, each source has at most one pending `.next()` call at any time; the implementation does not proactively pull ahead from sources beyond what is needed to detect availability. A source's next `.next()` is only called after its previous result has been enqueued into |ready|.
+
+Note: This is *not* `Promise.race` semantics where "losing" values are discarded. Every batch from every source is yielded exactly once through the |ready| queue.
+</div>
+
+`Stream.ondrain()` {#ondrain-method}
+------------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">ondrain(drainable)</dfn> method waits for a {{Writer}}'s backpressure to clear.
+
+<ol>
+<li>If |drainable| does not have a method keyed by `Symbol.for('Stream.drainableProtocol')`, return `null`.
+<li>Let |result| be the result of calling that method on |drainable|.
+<li>Return |result|, which is: `null` if drain is not applicable; a promise resolving to `true` when backpressure clears; a promise resolving to `false` if the writer closes while waiting; or a promise that rejects if the writer errors.
+</ol>
+</div>
+
+Note: `await null` evaluates to `null`, which is falsy. The pattern `const canWrite = await Stream.ondrain(writer); if (!canWrite) return;` works correctly even when the protocol is not supported.
+
+
+Multi-consumer streams {#multi}
+===============================
+
+Broadcast {#broadcast-section}
+------------------------------
+
+### `Stream.broadcast()` ### {#broadcast-method}
+
+<div algorithm>
+The <dfn method for="Stream">broadcast(options)</dfn> method creates a [=broadcast channel=], a push-model multi-consumer pattern.
+
+<ol>
+<li>Let |highWaterMark| be the result of clamping |options|["{{BroadcastOptions/highWaterMark}}"] to the range [1, implementation-defined maximum].
+<li>Let |backpressure| be |options|["{{BroadcastOptions/backpressure}}"].
+<li>Create a shared circular buffer with capacity |highWaterMark|.
+<li>Let |writer| be a new {{Writer}} backed by the shared buffer with |backpressure| policy.
+<li>Let |broadcast| be a new {{Broadcast}} object backed by the shared buffer.
+<li>Return «[ "writer" → |writer|, "broadcast" → |broadcast| ]».
+</ol>
+</div>
+
+### Broadcast backpressure ### {#broadcast-backpressure}
+
+Backpressure in a [=broadcast channel=] is governed entirely by the **slowest consumer**. Each consumer maintains a cursor into the shared circular buffer. The {{Writer/desiredSize}} of the broadcast's {{Writer}} is determined by the consumer whose cursor is furthest behind: the consumer with the most unconsumed data.
+
+Concretely:
+
+*   The shared buffer cannot overwrite entries that the slowest consumer has not yet read. The effective buffer capacity, from the writer's perspective, is the distance between the write position and the slowest consumer's cursor.
+
+*   When the slowest consumer falls behind and the buffer fills, the configured [=backpressure policy=] applies to the writer: `"strict"` rejects excess writes, `"block"` causes writes to wait, `"drop-oldest"` advances the slowest cursor (discarding unread data for that consumer), and `"drop-newest"` discards incoming writes.
+
+*   Faster consumers that have already read all available data will wait for the next write. They are never the bottleneck.
+
+*   When a slow consumer detaches (its iterator returns or throws), backpressure is immediately recalculated based on the remaining consumers. This may unblock pending writes if the detached consumer was the slowest.
+
+*   If there are no consumers, writes succeed up to the buffer capacity as governed by the [=backpressure policy=]. Data remains in the buffer and is available to consumers that attach before it is overwritten. Late-joining consumers begin reading from the oldest entry still in the buffer at the time they call {{Broadcast/push()}}.
+
+Note: Because a single slow consumer can stall all producers, callers should consider using `"drop-oldest"` or `"drop-newest"` policies when consumers may have widely varying consumption rates and the data is tolerant of loss.
+
+### `Broadcast.push()` ### {#broadcast-push}
+
+<div algorithm>
+The <dfn method for="Broadcast">push(...args)</dfn> method creates a new consumer of the broadcast.
+
+<ol>
+<li>Let |transforms| be an empty list and |options| be an empty {{PullOptions}}.
+<li>[=Parse variadic transform arguments=] from |args| into |transforms| and |options|.
+<li>Create a new cursor at the current write position in the shared buffer.
+<li>Let |pipelineController| be a new {{AbortController}}. If |options|["{{PullOptions/signal}}"] is present, set |pipelineController|'s signal to follow it.
+<li>Let |cursorIterable| be an async iterable that advances the cursor on each step, waiting for new data if needed.
+<li>Return the result of [=compose transform pipeline=] with |cursorIterable|, |transforms|, and a {{TransformCallbackOptions}} with signal set to |pipelineController|'s signal. On break/error, abort |pipelineController| and detach the cursor.
+</ol>
+</div>
+
+### `Broadcast.cancel()` / `Broadcast.dispose()` ### {#broadcast-cancel}
+
+The <dfn method for="Broadcast">cancel(reason)</dfn> method cancels all consumers. If |reason| is provided, each consumer sees it as an error; otherwise they see clean completion.
+
+The <dfn method for="Broadcast">dispose()</dfn> method calls {{Broadcast/cancel()}} with no argument, enabling the `Symbol.dispose` protocol.
+
+Share {#share-section}
+----------------------
+
+### `Stream.share()` ### {#share-method}
+
+<div algorithm>
+The <dfn method for="Stream">share(source, options)</dfn> method creates a [=shared source=], a pull-model multi-consumer pattern.
+
+<ol>
+<li>Let |normalized| be the result of {{Stream/from()}} with |source|.
+<li>Let |highWaterMark| be the result of clamping |options|["{{ShareOptions/highWaterMark}}"] to the range [1, implementation-defined maximum].
+<li>Let |backpressure| be |options|["{{ShareOptions/backpressure}}"].
+<li>Create a shared buffer with capacity |highWaterMark|. The source iterator is created lazily on first pull.
+<li>Return a new {{Share}} object backed by the shared buffer, |backpressure| policy, and |normalized| as the upstream source.
+</ol>
+</div>
+
+### Share buffering and backpressure ### {#share-backpressure}
+
+A [=shared source=] uses a shared buffer and per-consumer cursors in the same manner as a [=broadcast channel=], with one key difference: data enters the buffer by being **pulled from the upstream source** rather than pushed by a writer.
+
+*   Each consumer maintains a cursor into the shared buffer. When a consumer pulls and its cursor points to data already in the buffer, it reads directly without pulling from the upstream source.
+
+*   When a consumer pulls and no data is available at its cursor position, the [=shared source=] pulls the next batch from the upstream source iterator, stores it in the shared buffer, and advances the cursor.
+
+*   Only one pull from the upstream source occurs at a time, regardless of how many consumers request data concurrently. If multiple consumers are waiting for the next batch, a single upstream pull satisfies all of them.
+
+*   The shared buffer is trimmed as all consumers advance past buffered entries. An entry is eligible for removal only when every active consumer's cursor has moved beyond it.
+
+*   When the slowest consumer falls behind and the buffer reaches capacity, the configured [=backpressure policy=] determines what happens when a faster consumer attempts to pull new data from upstream. With `"strict"`, the pull is rejected. The faster consumer receives an error indicating the buffer is full, but the consumer's iterator remains valid and subsequent pulls may succeed once the slow consumer advances. With `"block"`, the pull is blocked until the slowest consumer advances and frees buffer space. With `"drop-oldest"`, the oldest entry is discarded (advancing the slowest cursor) to make room for the new upstream pull. With `"drop-newest"`, the upstream pull result is discarded.
+
+Note: A rejected pull under `"strict"` does not terminate the consumer's iterator. Within the constraints of the async iterator protocol, the `.next()` call returns a rejected promise, but the iterator is not put into a "done" state. The consumer may retry by calling `.next()` again. However, if the consumer is using `for await...of`, the rejected promise will cause the loop to exit and the iterator to be closed via `.return()`. This is standard async iterator protocol behavior, not specific to this API.
+
+*   When a slow consumer detaches, the buffer may be trimmed and blocked consumers may be unblocked, just as with [=broadcast channel|broadcast=].
+
+*   If there are no consumers, no upstream pulls occur (the source is lazy).
+
+### `Share.pull()` ### {#share-pull}
+
+<div algorithm>
+The <dfn method for="Share">pull(...args)</dfn> method creates a new consumer.
+
+<ol>
+<li>Let |transforms| and |options| be extracted from |args| via [=parse variadic transform arguments=].
+<li>Create a new cursor at the current buffer position. If the source iterator has not been created yet, create it now (lazy initialization).
+<li>Let |pipelineController| be a new {{AbortController}}. If |options|["{{PullOptions/signal}}"] is present, set |pipelineController|'s signal to follow it.
+<li>Let |cursorIterable| be an async iterable that checks the cursor position, reads from the buffer if available or pulls from the source iterator if not, and trims the buffer when all consumers have advanced.
+<li>Return the result of [=compose transform pipeline=] with |cursorIterable|, |transforms|, and a {{TransformCallbackOptions}} with signal set to |pipelineController|'s signal. On break/error, abort |pipelineController| and detach the cursor.
+</ol>
+</div>
+
+### `Share.cancel()` / `Share.dispose()` ### {#share-cancel}
+
+The <dfn method for="Share">cancel(reason)</dfn> method cancels all consumers and closes the source iterator. The <dfn method for="Share">dispose()</dfn> method calls {{Share/cancel()}} with no argument.
+
+### `Stream.shareSync()` ### {#sharesync-method}
+
+<div algorithm>
+The <dfn method for="Stream">shareSync(source, options)</dfn> method creates a synchronous [=shared source=].
+
+<ol>
+<li>Let |normalized| be the result of {{Stream/fromSync()}} with |source|.
+<li>Let |highWaterMark| be the result of clamping |options|["{{ShareSyncOptions/highWaterMark}}"] to the range [1, implementation-defined maximum].
+<li>Let |backpressure| be |options|["{{ShareSyncOptions/backpressure}}"].
+<li>Create a shared buffer with capacity |highWaterMark|. The source iterator is created lazily on first pull.
+<li>Return a new {{SyncShare}} object backed by the shared buffer, |backpressure| policy, and |normalized| as the upstream source.
+</ol>
+</div>
+
+
+Duplex channels {#duplex-section}
+=================================
+
+`Stream.duplex()` {#duplex-method}
+----------------------------------
+
+<div algorithm>
+The <dfn method for="Stream">duplex(options)</dfn> method creates a pair of connected {{DuplexChannel}} objects for bidirectional communication, similar to Unix `socketpair()`.
+
+<ol>
+<li>Let |sharedHWM| be |options|["{{DuplexOptions/highWaterMark}}"] and |sharedBP| be |options|["{{DuplexOptions/backpressure}}"].
+<li>Let |aOpts| be |options|["{{DuplexOptions/a}}"] merged with shared defaults, and |bOpts| be |options|["{{DuplexOptions/b}}"] merged with shared defaults.
+<li>Create [=push stream=] A→B with |aOpts| settings, yielding |writerA| and |readableAB|.
+<li>Create [=push stream=] B→A with |bOpts| settings, yielding |writerB| and |readableBA|.
+<li>Let |channelA| be a new {{DuplexChannel}} with writer |writerA| (writes go to B), readable |readableBA| (reads come from B). Calling {{DuplexChannel/close()}} on |channelA| ends |writerA| (signaling end-of-stream to B's readable) and stops iteration of |readableBA| (by calling `.return()` on its iterator if active). The close is idempotent.
+<li>Let |channelB| be a new {{DuplexChannel}} with writer |writerB| (writes go to A), readable |readableAB| (reads come from A). Calling {{DuplexChannel/close()}} on |channelB| ends |writerB| and stops iteration of |readableAB|. The close is idempotent.
+<li>If |options|["{{DuplexOptions/signal}}"] is present, register an abort handler that closes both channels.
+<li>Return « |channelA|, |channelB| ».
+</ol>
+</div>
+
+Example:
+
+```js
+const [client, server] = Stream.duplex();
+{
+  await using conn = client;
+  await conn.writer.write('Hello');
+} // conn.close() called automatically
+```
+
+
+Protocol symbols {#protocols}
+=============================
+
+Protocol symbols allow user-defined objects to participate in the streaming API. All symbols are created via `Symbol.for()`, allowing third-party code to implement protocols without importing these symbols directly.
+
+ToStreamable protocols {#protocol-tostreamable}
+-----------------------------------------------
+
+<dl>
+  <dt>`Symbol.for('Stream.toStreamable')`</dt>
+  <dd>A method returning a synchronous streamable representation. The return value may be any type accepted by {{Stream/from()}} or {{Stream/fromSync()}}: a {{USVString}}, {{ArrayBuffer}}, {{ArrayBufferView}}, or an object with `Symbol.iterator`. Used by both sync and async paths.</dd>
+
+  <dt>`Symbol.for('Stream.toAsyncStreamable')`</dt>
+  <dd>A method returning (or returning a promise resolving to) an async streamable representation. Used by {{Stream/from()}} only (not by sync functions). When both protocols are present, async paths prefer `toAsyncStreamable`.</dd>
+</dl>
+
+Multi-consumer protocols {#protocol-multi}
+------------------------------------------
+
+<dl>
+  <dt>`Symbol.for('Stream.broadcastProtocol')`</dt>
+  <dd>A method accepting an optional {{BroadcastOptions}} and returning a {{Broadcast}} object. Enables custom types to provide optimized broadcast implementations.</dd>
+
+  <dt>`Symbol.for('Stream.shareProtocol')`</dt>
+  <dd>A method accepting an optional {{ShareOptions}} and returning a {{Share}} object.</dd>
+
+  <dt>`Symbol.for('Stream.shareSyncProtocol')`</dt>
+  <dd>A method accepting an optional {{ShareSyncOptions}} and returning a {{SyncShare}} object.</dd>
+</dl>
+
+Drainable protocol {#protocol-drainable}
+----------------------------------------
+
+<dl>
+  <dt>`Symbol.for('Stream.drainableProtocol')`</dt>
+  <dd>
+    A method returning `null` or a promise resolving to a boolean. Used by {{Stream/ondrain()}} to wait for backpressure to clear. Return values: `null` if drain is not applicable; promise resolving to `true` when ready; promise resolving to `false` if the writer closed; promise rejecting if the writer errored. {{Writer}} objects returned by {{Stream/push()}} and {{Stream/broadcast()}} automatically implement this protocol.
+  </dd>
+</dl>
+
+
+Abstract operations {#ao}
+=========================
+
+Parse variadic transform arguments {#ao-parse-transforms}
+----------------------------------------------------------
+
+<div algorithm>
+To <dfn>parse variadic transform arguments</dfn> from an arguments list |args|, returning a list of transforms and an options dictionary:
+
+<ol>
+<li>Let |transforms| be an empty list and |options| be `undefined`.
+<li>For each |arg| in |args|: if |arg| is a [=transform argument=], append it to |transforms|; otherwise, if |options| is `undefined`, set |options| to |arg|; otherwise throw a {{TypeError}}.
+<li>If |options| is `undefined`, set |options| to an empty dictionary.
+<li>Return (|transforms|, |options|).
+</ol>
+</div>
+
+<div algorithm>
+To <dfn>parse pipeTo arguments</dfn> from an arguments list |args| and a |writerInterface| (either {{Writer}} or {{SyncWriter}}), returning a list of transforms, a writer, and an options dictionary:
+
+<ol>
+<li>If |args| is empty, throw a {{TypeError}} (a writer is required).
+<li>Let |last| be the final element of |args|.
+<li>Let |options| be `undefined`.
+<li>If |last| is not a [=transform argument=] and does not conform to |writerInterface| (i.e., it lacks `write` and `end` methods), treat |last| as the options dictionary: set |options| to |last| and remove it from |args|.
+<li>If |args| is now empty, throw a {{TypeError}} (a writer is required).
+<li>Let |writer| be the final element of |args| and remove it from |args|.
+<li>If |writer| does not conform to |writerInterface|, throw a {{TypeError}}.
+<li>Let |transforms| be an empty list.
+<li>For each remaining |arg| in |args|: if |arg| is a [=transform argument=], append it to |transforms|; otherwise throw a {{TypeError}}.
+<li>If |options| is `undefined`, set |options| to an empty dictionary.
+<li>Return (|transforms|, |writer|, |options|).
+</ol>
+</div>
+
+Note: The convention across all variadic methods is that the options dictionary, when present, is always the **final** argument. Transforms precede it in definition order. For {{Stream/pipeTo()}} and {{Stream/pipeToSync()}}, the argument order is `(transforms..., writer, options?)`: the writer is either the final argument (when no options are provided) or second-to-last (when options are provided), with any number of transforms preceding it.
+
+Notify drain waiters {#ao-notify-drain}
+---------------------------------------
+
+<div algorithm>
+To <dfn>notify drain waiters</dfn> for a writer, optionally with an error |reason|:
+
+<ol>
+<li>For each pending drain promise associated with this writer: if |reason| was given, reject the promise with |reason|; otherwise, if the writer is closed, resolve the promise with `false`; otherwise, resolve the promise with `true`.
+<li>Clear the list of pending drain promises.
+</ol>
+</div>
+
+UTF-8 encode {#ao-utf8}
+------------------------
+
+<div algorithm>
+To <dfn>UTF-8 encode</dfn> a string |s|: let |encoder| be an instance of {{TextEncoder}} as defined in [[!ENCODING]]; return the result of calling |encoder|.`encode`(|s|).
+</div>
+
+
+<h2 class="no-num" id="acknowledgements">Acknowledgements</h2>
+
+The design of this API was informed by practical experience with the WHATWG Streams Standard [[STREAMS]], Node.js streams, and streaming patterns in server-side 5 JavaScript runtimes including Cloudflare Workers, Deno, and Bun.
