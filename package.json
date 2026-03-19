@@ -8,6 +8,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
+    "build:spec": "bash build-spec.sh",
     "test": "node --import tsx --test src/**/*.test.ts",
     "test:watch": "node --import tsx --test --watch src/**/*.test.ts",
     "benchmark": "npx tsx benchmarks/run-all.ts",
