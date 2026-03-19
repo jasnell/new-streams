@@ -198,7 +198,7 @@ for await (const chunks of readable) {
 Backpressure in push streams is explicit and strict by default. Writers must await `write()` calls to avoid overwhelming the buffer.
 
 The `backpressure` option allows alternative policies:
-- `'strict'` (default) - Writes reject immediately when buffer is full
+- `'strict'` (default) - Awaited writes wait for space; rejects when both slots buffer and pending writes queue are at capacity
 - `'block'` - Async writes wait for buffer space; sync writes return false
 - `'drop-oldest'` - Oldest buffered chunks are dropped to make room for new writes
 - `'drop-newest'` - Incoming writes are dropped when buffer is full
@@ -537,13 +537,14 @@ interface ToAsyncStreamable {
 class JsonMessage {
   constructor(private data: object) {}
 
-  [Stream.toStreamable]() {
+  [Symbol.for('Stream.toStreamable')]() {
     return JSON.stringify(this.data);
   }
 }
 
-// Can be written directly
-await writer.write(new JsonMessage({ hello: "world" }));
+// Used by Stream.from() to normalize input (not by writer.write())
+const readable = Stream.from(new JsonMessage({ hello: "world" }));
+const text = await Stream.text(readable);
 ```
 
 ### Broadcastable / Shareable
@@ -730,33 +731,12 @@ dictionary BroadcastOptions {
 [Exposed=*]
 interface Broadcast {
   // Create consumer with optional transforms
-  ReadableByteStream push(Transform... transforms, optional PushStreamOptions options = {});
+  ReadableByteStream push(Transform... transforms, optional PullOptions options = {});
 
   readonly attribute unsigned long consumerCount;
   readonly attribute unsigned long bufferSize;
 
   undefined cancel(optional any reason);
-};
-
-[Exposed=*]
-interface BroadcastResult {
-  readonly attribute Writer writer;
-  readonly attribute Broadcast broadcast;
-};
-```
-
-### Share (Pull-Model Multi-Consumer)
-
-```webidl
-dictionary ShareOptions {
-  unsigned long highWaterMark = 16;
-  BackpressurePolicy backpressure = "strict";
-  AbortSignal signal;
-};
-
-dictionary ShareSyncOptions {
-  unsigned long highWaterMark = 16;
-  BackpressurePolicy backpressure = "strict";
 };
 
 [Exposed=*]
@@ -830,8 +810,18 @@ namespace Stream {
   SyncShare shareSync(object source, optional ShareSyncOptions options = {});
 
   // Observation transforms
-  Transform tap(TapCallback callback);
-  SyncTransform tapSync(SyncTapCallback callback);
+  StatelessTransformFn tap(TapCallback callback);
+  SyncStatelessTransformFn tapSync(SyncTapCallback callback);
+
+  // Drain
+  Promise<boolean>? ondrain(any drainable);
+
+  // Async consumers (array)
+  Promise<sequence<Uint8Array>> array(object source, optional ConsumeOptions options = {});
+  sequence<Uint8Array> arraySync(object source, optional ConsumeSyncOptions options = {});
+
+  // Duplex
+  sequence<DuplexChannel> duplex(optional DuplexOptions options = {});
 };
 
 callback TapCallback = (undefined or Promise<undefined>) (ChunkBatch? chunks);
@@ -840,23 +830,17 @@ callback SyncTapCallback = undefined (ChunkBatch? chunks);
 
 ### Protocol Symbols
 
-```webidl
-// Protocol symbols for extensibility (accessed via Stream namespace)
-// These allow custom objects to participate in streaming
+Protocol symbols are accessed via `Symbol.for()`, not as namespace attributes.
+This allows third-party code to implement protocols without importing anything.
 
-partial namespace Stream {
-  // Value conversion protocols
-  readonly attribute symbol toStreamable;      // Symbol.for('Stream.toStreamable')
-  readonly attribute symbol toAsyncStreamable; // Symbol.for('Stream.toAsyncStreamable')
-
-  // Multi-consumer protocols
-  readonly attribute symbol broadcastProtocol; // Symbol.for('Stream.broadcastProtocol')
-  readonly attribute symbol shareProtocol;     // Symbol.for('Stream.shareProtocol')
-  readonly attribute symbol shareSyncProtocol; // Symbol.for('Stream.shareSyncProtocol')
-};
 ```
-
-### Static Factory Methods
+Symbol.for('Stream.toStreamable')       // Value conversion (sync)
+Symbol.for('Stream.toAsyncStreamable')  // Value conversion (async)
+Symbol.for('Stream.broadcastProtocol')  // Custom broadcast implementation
+Symbol.for('Stream.shareProtocol')      // Custom share implementation
+Symbol.for('Stream.shareSyncProtocol')  // Custom sync share implementation
+Symbol.for('Stream.drainableProtocol')  // Drain notification
+```
 
 
 

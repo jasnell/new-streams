@@ -470,7 +470,7 @@ const splitLines = {
 const lines = Stream.pull(source, splitLines);
 ```
 
-### Transform with Abort Handler
+### Transform with Cleanup
 
 **Web Streams:**
 ```javascript
@@ -484,13 +484,12 @@ const transform = new TransformStream({
 });
 ```
 
-**New Stream API:**
+**New Stream API (stateless with signal-based cleanup):**
 ```javascript
-const transform = {
-  transform(chunks) {
-    if (chunks === null) return null;
-    return chunks.map(process);
-  },
+const transform = (chunks, { signal }) => {
+  signal.addEventListener('abort', () => cleanup(signal.reason), { once: true });
+  if (chunks === null) return null;
+  return chunks.map(process);
 };
 
 const result = Stream.pull(source, transform);

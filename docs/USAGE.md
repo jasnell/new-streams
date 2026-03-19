@@ -231,7 +231,7 @@ When consumers read at different speeds:
 
 ```typescript
 // Risk: Slow consumer causes unbounded buffering
-const shared = Stream.share(source);  // Default: no limit
+const shared = Stream.share(source);  // Default: highWaterMark 16, strict
 
 // Safe: Limit buffer with policy
 const shared = Stream.share(source, {
@@ -346,36 +346,32 @@ for (const batch of Stream.fromSync(syncData)) {
 }
 ```
 
-### 4. Don't Forget to Handle the Flush Signal in Stateful Transforms
+### 4. Don't Forget to Handle the Flush Signal in Transforms
 
 ```typescript
-// Anti-pattern: Ignoring null (flush) signal
-const bufferingTransform = {
-  buffer: [] as Uint8Array[],
-  transform(batch: Uint8Array[] | null) {
-    if (!batch) return null;  // Loses buffered data!
-    this.buffer.push(...batch);
-    if (this.buffer.length >= 10) {
-      return this.buffer.splice(0, 10);
-    }
-    return null;
+// Anti-pattern: Ignoring null (flush) signal in a stateless transform
+const buffer: Uint8Array[] = [];
+const bufferingTransform = (batch: Uint8Array[] | null) => {
+  if (!batch) return null;  // Loses buffered data!
+  buffer.push(...batch);
+  if (buffer.length >= 10) {
+    return buffer.splice(0, 10);
   }
+  return null;
 };
 
-// Correct: Flush remaining data
-const bufferingTransform = {
-  buffer: [] as Uint8Array[],
-  transform(batch: Uint8Array[] | null) {
-    if (batch === null) {
-      // Flush signal - return remaining buffered data
-      return this.buffer.length > 0 ? this.buffer.splice(0) : null;
-    }
-    this.buffer.push(...batch);
-    if (this.buffer.length >= 10) {
-      return this.buffer.splice(0, 10);
-    }
-    return null;
+// Correct: Flush remaining data on null signal
+const buffer2: Uint8Array[] = [];
+const bufferingTransform2 = (batch: Uint8Array[] | null) => {
+  if (batch === null) {
+    // Flush signal - return remaining buffered data
+    return buffer2.length > 0 ? buffer2.splice(0) : null;
   }
+  buffer2.push(...batch);
+  if (buffer2.length >= 10) {
+    return buffer2.splice(0, 10);
+  }
+  return null;
 };
 ```
 
@@ -465,9 +461,15 @@ async function handler(req, res) {
 async function handler(req, res) {
   const content = generateContent();
   await Stream.pipeTo(content, {
-    write(chunk) { res.write(chunk); },
-    end() { res.end(); },
-    fail(err) { res.destroy(err); }
+    write(chunk) { res.write(chunk); return Promise.resolve(); },
+    writev(chunks) { for (const c of chunks) res.write(c); return Promise.resolve(); },
+    end() { res.end(); return Promise.resolve(0); },
+    fail(err) { res.destroy(err); return Promise.resolve(); },
+    writeSync(chunk) { res.write(chunk); return true; },
+    writevSync(chunks) { for (const c of chunks) res.write(c); return true; },
+    endSync() { return -1; },  // fall back to async
+    failSync() { return false; },
+    desiredSize: 1,
   });
 }
 ```

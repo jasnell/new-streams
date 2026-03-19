@@ -121,7 +121,7 @@ writer and readable are connected—data written to the writer flows to anyone
 iterating the readable.
 
 The `highWaterMark` controls the buffer size (slots) and, for `'strict'` mode,
-also limits pending writes. With the default of 1 and `'strict'` backpressure,
+also limits pending writes. With `'strict'` backpressure (the default),
 properly awaited writes will wait for buffer space, while "fire-and-forget"
 writes (not awaited) will throw when exceeding the pending limit.
 
@@ -1036,7 +1036,7 @@ interface Broadcast {
   readonly bufferSize: number;
 
   cancel(reason?: any): void;
-  dispose(): void;  // Calls cancel(); enables Symbol.dispose protocol
+  // Supports Symbol.dispose (calls cancel())
 }
 ```
 
@@ -1090,7 +1090,7 @@ interface Share {
   readonly consumerCount: number;
   readonly bufferSize: number;
   cancel(reason?: any): void;
-  dispose(): void;  // Calls cancel(); enables Symbol.dispose protocol
+  // Supports Symbol.dispose (calls cancel())
 }
 ```
 

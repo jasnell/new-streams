@@ -383,13 +383,12 @@ interface Broadcast {
   ByteReadableStream push(any... args);
 
   undefined cancel(optional any reason);
-  undefined dispose();
 };
 </pre>
 
 The {{Broadcast}} interface is the consumer-facing side of a [=broadcast channel=]. The {{Broadcast/push()}} method accepts an optional sequence of transforms followed by an optional {{PullOptions}} dictionary, and returns a {{ByteReadableStream}}. See [[#broadcast-section]] for full semantics.
 
-Note: {{Broadcast}} is an interface, not a concrete class. Any object conforming to this interface can serve as a broadcast. {{Broadcast}} objects support the `Symbol.dispose` protocol; calling {{Broadcast/dispose()}} is equivalent to calling {{Broadcast/cancel()}} with no argument, enabling `using` declarations.
+Note: {{Broadcast}} is an interface, not a concrete class. Any object conforming to this interface can serve as a broadcast. Implementations should support `Symbol.dispose`, calling {{Broadcast/cancel()}} with no argument, enabling `using` declarations.
 
 The Share interface {#idl-share}
 --------------------------------
@@ -402,13 +401,12 @@ interface Share {
   ByteReadableStream pull(any... args);
 
   undefined cancel(optional any reason);
-  undefined dispose();
 };
 </pre>
 
 The {{Share}} interface is the consumer-facing side of a [=shared source=]. The {{Share/pull()}} method accepts an optional sequence of transforms followed by an optional {{PullOptions}} dictionary, and returns an object conforming to `AsyncIterable<Uint8Array[]>`. See [[#share-section]] for full semantics.
 
-Note: {{Share}} is an interface, not a concrete class. Any object conforming to this interface can serve as a share. {{Share}} objects support the `Symbol.dispose` protocol.
+Note: {{Share}} is an interface, not a concrete class. Any object conforming to this interface can serve as a share. Implementations should support `Symbol.dispose`, calling {{Share/cancel()}} with no argument.
 
 The SyncShare interface {#idl-syncshare}
 ----------------------------------------
@@ -421,13 +419,12 @@ interface SyncShare {
   SyncByteReadableStream pull(any... args);
 
   undefined cancel(optional any reason);
-  undefined dispose();
 };
 </pre>
 
 The {{SyncShare}} interface is the synchronous counterpart of {{Share}}. {{SyncShare/pull()}} accepts an optional sequence of sync transforms and returns an object conforming to `Iterable<Uint8Array[]>`.
 
-Note: Like {{Share}}, {{SyncShare}} is an interface, not a concrete class.
+Note: Like {{Share}}, {{SyncShare}} is an interface, not a concrete class. Implementations should support `Symbol.dispose`, calling {{SyncShare/cancel()}} with no argument.
 
 The DuplexChannel interface {#idl-duplexchannel}
 -------------------------------------------------
@@ -1004,11 +1001,11 @@ The <dfn method for="Broadcast">push(...args)</dfn> method creates a new consume
 </ol>
 </div>
 
-### `Broadcast.cancel()` / `Broadcast.dispose()` ### {#broadcast-cancel}
+### `Broadcast.cancel()` ### {#broadcast-cancel}
 
 The <dfn method for="Broadcast">cancel(reason)</dfn> method cancels all consumers. If |reason| is provided, each consumer sees it as an error; otherwise they see clean completion.
 
-The <dfn method for="Broadcast">dispose()</dfn> method calls {{Broadcast/cancel()}} with no argument, enabling the `Symbol.dispose` protocol.
+Implementations should support `Symbol.dispose` by calling {{Broadcast/cancel()}} with no argument.
 
 Share {#share-section}
 ----------------------
@@ -1061,9 +1058,9 @@ The <dfn method for="Share">pull(...args)</dfn> method creates a new consumer.
 </ol>
 </div>
 
-### `Share.cancel()` / `Share.dispose()` ### {#share-cancel}
+### `Share.cancel()` ### {#share-cancel}
 
-The <dfn method for="Share">cancel(reason)</dfn> method cancels all consumers and closes the source iterator. The <dfn method for="Share">dispose()</dfn> method calls {{Share/cancel()}} with no argument.
+The <dfn method for="Share">cancel(reason)</dfn> method cancels all consumers and closes the source iterator. Implementations should support `Symbol.dispose` by calling {{Share/cancel()}} with no argument.
 
 ### `Stream.shareSync()` ### {#sharesync-method}
 
