@@ -1124,7 +1124,7 @@ The <dfn method for="Stream">duplex(options)</dfn> method creates a pair of conn
 <li>Create [=push stream=] B→A with |bOpts| settings, yielding |writerB| and |readableBA|.
 <li>Let |channelA| be a new {{DuplexChannel}} with writer |writerA| (writes go to B), readable |readableBA| (reads come from B). Calling {{DuplexChannel/close()}} on |channelA| ends |writerA| (signaling end-of-stream to B's readable) and stops iteration of |readableBA| (by calling `.return()` on its iterator if active). The close is idempotent.
 <li>Let |channelB| be a new {{DuplexChannel}} with writer |writerB| (writes go to A), readable |readableAB| (reads come from A). Calling {{DuplexChannel/close()}} on |channelB| ends |writerB| and stops iteration of |readableAB|. The close is idempotent.
-<li>If |options|["{{DuplexOptions/signal}}"] is present, register an abort handler that closes both channels.
+<li>If |options|["{{DuplexOptions/signal}}"] is present, register an abort handler that calls {{Writer/fail()}} on both writers with the signal's abort reason.
 <li>Return « |channelA|, |channelB| ».
 </ol>
 </div>
