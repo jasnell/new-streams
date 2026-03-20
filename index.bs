@@ -1240,4 +1240,4 @@ To <dfn>UTF-8 encode</dfn> a string |s|: let |encoder| be an instance of {{TextE
 
 <h2 class="no-num" id="acknowledgements">Acknowledgements</h2>
 
-The design of this API was informed by practical experience with the WHATWG Streams Standard [[STREAMS]], Node.js streams, and streaming patterns in server-side 5 JavaScript runtimes including Cloudflare Workers, Deno, and Bun.
+The design of this API was informed by practical experience with the WHATWG Streams Standard [[STREAMS]], Node.js streams, and streaming patterns in JavaScript runtimes including Cloudflare Workers, Node.js, Deno, Bun, and Web Browsers.
