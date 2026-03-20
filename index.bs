@@ -924,7 +924,7 @@ Utilities {#utilities}
 --------------------------------------------------
 
 <div algorithm>
-The <dfn method for="Stream">tap(callback)</dfn> method creates a stateless transform that observes chunks without modifying them. The |callback| is called with each batch (or `null` for the [=flush signal=]). Its return value is ignored; the original batch is yielded unchanged. If the callback throws (or returns a rejected promise, for async callbacks), the error propagates to the consumer and the pipeline is torn down. The tap does not swallow errors. Returns a transform function suitable for use in {{Stream/pull()}} or {{Stream/push()}}.
+The <dfn method for="Stream">tap(callback)</dfn> method creates a stateless transform that observes chunks without modifying them. The |callback| is called with each batch (or `null` for the [=flush signal=]) and the {{TransformCallbackOptions}} (including the pipeline's signal). Its return value is ignored; the original batch is yielded unchanged. If the callback throws (or returns a rejected promise, for async callbacks), the error propagates to the consumer and the pipeline is torn down. The tap does not swallow errors. Returns a transform function suitable for use in {{Stream/pull()}} or {{Stream/push()}}.
 </div>
 
 The <dfn method for="Stream">tapSync(callback)</dfn> method creates a synchronous tap transform.
@@ -939,7 +939,7 @@ The <dfn method for="Stream">merge(...args)</dfn> method interleaves multiple as
 
 <ol>
 <li>Let |options| be an empty {{MergeOptions}}.
-<li>If the final element of |args| is a plain object that has a {{MergeOptions/signal}} member and does not have `Symbol.asyncIterator` or `Symbol.iterator`, set |options| to that element and remove it from |args|.
+<li>If the final element of |args| is a plain object that does not have `Symbol.asyncIterator` or `Symbol.iterator`, treat it as the options dictionary: set |options| to that element and remove it from |args|.
 <li>Let |sources| be |args|. For each element in |sources|, normalize it via {{Stream/from()}}.
 <li>Let |signal| be |options|["{{MergeOptions/signal}}"] if present.
 <li>Create an active iterator for each source by calling `Symbol.asyncIterator` on it.
