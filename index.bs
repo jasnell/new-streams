@@ -166,7 +166,7 @@ Transforms are strictly lazy in both models: no transform function executes unti
 Try-fallback pattern {#concept-try-fallback}
 --------------------------------------------
 
-The {{Writer}} interface provides synchronous variants of its methods ({{Writer/writeSync()}}, {{Writer/writevSync()}}, {{Writer/endSync()}}, {{Writer/failSync()}}) alongside the async versions. The intended usage is a <dfn>try-fallback pattern</dfn>: attempt the synchronous method first, and if it indicates failure, fall back to the async version.
+The {{Writer}} interface provides synchronous variants of its write and end methods ({{Writer/writeSync()}}, {{Writer/writevSync()}}, {{Writer/endSync()}}) alongside the async versions. The intended usage is a <dfn>try-fallback pattern</dfn>: attempt the synchronous method first, and if it indicates failure, fall back to the async version. ({{Writer/fail()}} is unconditionally synchronous and does not participate in this pattern.)
 
 For {{Writer/writeSync()}} and {{Writer/writevSync()}}, a return value of `false` indicates the synchronous attempt was not accepted. For {{Writer/endSync()}}, a return value of −1 indicates the same. In either case, the caller should fall back to the async method and `await` it:
 
@@ -339,14 +339,13 @@ interface Writer {
   Promise&lt;unsigned long long> end(optional WriteOptions options = {});
   long long endSync();
 
-  Promise&lt;undefined> fail(optional any reason);
-  boolean failSync(optional any reason);
+  undefined fail(optional any reason);
 };
 </pre>
 
 The {{Writer}} interface is the API for producing data. See [[#writer-section]] for full semantics.
 
-Note: {{Writer}} is an interface, not a concrete class. Any object implementing this interface can serve as a writer. Implementations of {{Writer}} should support `Symbol.asyncDispose` (calling {{Writer/fail()}} with no argument), enabling `await using` syntax. Implementations may also support `Symbol.dispose` for synchronous cleanup.
+Note: {{Writer}} is an interface, not a concrete class. Any object implementing this interface can serve as a writer. Implementations should support both `Symbol.asyncDispose` and `Symbol.dispose` (calling {{Writer/fail()}} with no argument), enabling both `await using` and `using` syntax.
 
 The SyncWriter interface {#idl-syncwriter}
 ------------------------------------------
@@ -602,21 +601,51 @@ The <dfn method for="Writer">writevSync(chunks)</dfn> method performs the same s
 
 ### `Writer.end()` / `Writer.endSync()` ### {#writer-end}
 
+A writer in the <dfn>closing</dfn> state has had {{Writer/end()}} called but has not yet fully drained its buffered data to the consumer.
+
 <div algorithm>
-The <dfn method for="Writer">end(options)</dfn> method signals end-of-stream. If the writer is already closed or errored, it returns [=a promise rejected with=] a {{TypeError}}. Otherwise it transitions the writer to the closed state, enqueues an end-of-stream sentinel, and returns [=a promise resolved with=] the total number of bytes written.
+The <dfn method for="Writer">end(options)</dfn> method signals end-of-stream and waits for buffered data to drain.
+
+<ol>
+<li>If the writer is errored, return [=a promise rejected with=] the stored error.
+<li>If the writer is [=closing=] or closed, return [=a promise resolved with=] the total number of bytes written (idempotent).
+<li>Transition the writer to the [=closing=] state.
+<li>Enqueue an end-of-stream sentinel into the buffer.
+<li>Return a promise that resolves with the total number of bytes written when the consumer has consumed past the end sentinel. If {{Writer/fail()}} is called while [=closing=], the promise rejects with the fail reason instead.
+</ol>
+
+Note: The byte count reflects total bytes passed through the writer, including bytes discarded under `"drop-oldest"` or `"drop-newest"` policies. It is a measure of throughput, not of bytes delivered to the consumer.
 </div>
 
 <div algorithm>
-The <dfn method for="Writer">endSync()</dfn> method attempts synchronous end-of-stream. If the writer is already closed, errored, or the buffer is full, it returns −1. Otherwise it transitions the writer to the closed state, enqueues an end-of-stream sentinel, and returns the total number of bytes written (≥ 0). A return of −1 is the signal to use the [=try-fallback pattern=] and await {{Writer/end()}}.
+The <dfn method for="Writer">endSync()</dfn> method attempts synchronous end-of-stream. Returns the total number of bytes written (≥ 0) on success, or −1 if the writer cannot end synchronously for any reason. A return of −1 is the signal to use the [=try-fallback pattern=] and await {{Writer/end()}}.
+
+If the writer is [=closing=] or closed, it returns the total number of bytes written (idempotent). If the writer can transition to the closed state synchronously (e.g., the buffer is empty and no async cleanup is required), it does so and returns the byte count. Otherwise it returns −1.
 </div>
 
-### `Writer.fail()` / `Writer.failSync()` ### {#writer-fail}
+Note: No assumption should be made about why `endSync()` returns −1. The writer may be errored, the buffer may not be empty, the underlying resource may not support synchronous close, or the implementation may simply not support it. The caller should always fall back to {{Writer/end()}}.
+
+### `Writer.fail()` ### {#writer-fail}
 
 <div algorithm>
-The <dfn method for="Writer">fail(reason)</dfn> method puts the writer into a terminal error state. If the writer is already closed or errored, it returns [=a promise resolved with=] `undefined`. Otherwise it transitions the writer to the errored state with |reason|, rejects all pending write promises with |reason|, calls [=notify drain waiters=] with error |reason|, and returns [=a promise resolved with=] `undefined`.
+The <dfn method for="Writer">fail(reason)</dfn> method puts the writer into a terminal error state synchronously.
+
+<ol>
+<li>If the writer is errored or closed, it is a no-op.
+<li>If the writer is [=closing=] (draining after {{Writer/end()}}): transition to the errored state with |reason|, reject the pending end promise with |reason|, reject all pending read promises with |reason|, and call [=notify drain waiters=] with error |reason|.
+<li>If the writer is open: transition to the errored state with |reason|, reject all pending write promises with |reason|, reject all pending read promises with |reason|, and call [=notify drain waiters=] with error |reason|.
+</ol>
 </div>
 
-The <dfn method for="Writer">failSync(reason)</dfn> method performs the same steps synchronously, returning `true` on success or `false` if the writer cannot transition. A return of `false` is the signal to use the [=try-fallback pattern=] and await {{Writer/fail()}}.
+Note: `fail()` is unconditionally synchronous. If called while the writer is [=closing=], it short-circuits the graceful drain initiated by {{Writer/end()}}.
+
+### Disposal ### {#writer-disposal}
+
+Implementations of {{Writer}} should support both `Symbol.asyncDispose` and `Symbol.dispose`:
+
+*   `Symbol.asyncDispose`: If the writer is open, calls {{Writer/fail()}} with no argument and returns a resolved promise. If the writer is [=closing=] (end was called, draining), returns the pending end promise, allowing the graceful drain to complete. If the writer is closed or errored, returns a resolved promise.
+
+*   `Symbol.dispose`: Calls {{Writer/fail()}} with no argument unconditionally (cannot wait for drain).
 
 
 Stream factories {#factories}
