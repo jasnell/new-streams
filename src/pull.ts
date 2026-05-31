@@ -574,7 +574,7 @@ async function* createAsyncPipeline(
   if (transforms.length === 0) {
     let completed = false;
     try {
-      for await (const batch of normalized) {
+      for await (const batch of abortableAsyncIterable(normalized, controller.signal)) {
         yield batch;
       }
       completed = true;

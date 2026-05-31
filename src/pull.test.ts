@@ -423,6 +423,20 @@ describe('pull()', () => {
 
       await assert.rejects(iterator.next(), { name: 'AbortError' });
     });
+
+    it('should reject future next() calls after abort for sync sources without transforms', async () => {
+      const controller = new AbortController();
+      const reason = new DOMException('Aborted', 'AbortError');
+      const iterator = pull(['a', 'b'], { signal: controller.signal })[Symbol.asyncIterator]();
+
+      const first = await iterator.next();
+      assert.strictEqual(first.done, false);
+      assert.strictEqual(decode(concatBytes(first.value)), 'a');
+
+      controller.abort(reason);
+
+      await assert.rejects(iterator.next(), { name: 'AbortError' });
+    });
   });
 
   describe('error handling', () => {
