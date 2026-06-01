@@ -547,6 +547,8 @@ The synchronous methods ({{Writer/writeSync()}}, {{Writer/writevSync()}}) operat
 
 The asynchronous methods ({{Writer/write()}}, {{Writer/writev()}}) first attempt to place the batch into the slots buffer. If the slots buffer is full, the write is placed into the pending writes queue (for `"strict"` and `"block"` policies). When the consumer reads and frees slots, pending writes are promoted from the pending queue into the slots buffer in order, and their promises resolve.
 
+If the bonded readable's consumer stops iterating (the async iterator returns or throws), the writer's consumer is no longer <dfn>active</dfn>. Subsequent synchronous writes return `false` and asynchronous writes reject, since the data has no consumer to receive it.
+
 ### `Writer.desiredSize` ### {#writer-desiredsize}
 
 <div algorithm>
@@ -564,8 +566,9 @@ The <dfn method for="Writer">write(chunk, options)</dfn> method writes a single 
 
 <ol>
 <li>If |chunk| is a {{USVString}}, set |chunk| to the result of [=UTF-8 encode|UTF-8 encoding=] |chunk|.
-<li>If the writer is closed, return [=a promise rejected with=] a {{TypeError}}.
+<li>If the writer is closed or [=closing=], return [=a promise rejected with=] a {{TypeError}}.
 <li>If the writer is errored, return [=a promise rejected with=] the stored error.
+<li>If the bonded consumer is not [=active=], return [=a promise rejected with=] a {{TypeError}} (or, if the consumer's iterator threw an error, reject with that error).
 <li>If |options|["{{WriteOptions/signal}}"] is present and [=AbortSignal/aborted=], return [=a promise rejected with=] its abort reason.
 <li>Let |batch| be « |chunk| ».
 <li>If the slots buffer has space, enqueue |batch|, [=notify drain waiters=], and return [=a promise resolved with=] `undefined`.
@@ -593,7 +596,7 @@ The <dfn method for="Writer">writeSync(chunk)</dfn> method attempts a synchronou
 
 <ol>
 <li>If |chunk| is a {{USVString}}, set |chunk| to the result of [=UTF-8 encode|UTF-8 encoding=] |chunk|.
-<li>If the writer is closed or errored, return `false`.
+<li>If the writer is closed, [=closing=], or errored, or if the bonded consumer is not [=active=], return `false`.
 <li>Let |batch| be « |chunk| ».
 <li>If the slots buffer has space, enqueue |batch|, [=notify drain waiters=], and return `true`.
 <li>The slots buffer is full. Proceed based on the [=backpressure policy=]:
